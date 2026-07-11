@@ -49,7 +49,9 @@ select all, Cmd+Q quit.
 
 ## Install
 
-Requires macOS 26 (Liquid Glass APIs).
+Runs on macOS 13 or later, Apple Silicon and Intel. On macOS 26 the notes are
+real Liquid Glass; on older versions they fall back to a simpler translucent
+blur panel.
 
 **Easiest - no tools needed:**
 

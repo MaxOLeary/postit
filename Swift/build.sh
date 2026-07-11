@@ -9,8 +9,12 @@ BIN="$APP/Contents/MacOS/Postit"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 
-# compile
-swiftc -O main.swift -o "$BIN"
+# compile - universal (Apple Silicon + Intel), floor macOS 13 so the
+# translucent-blur fallback path reaches older Macs
+swiftc -O -target arm64-apple-macos13.0  main.swift -o "$BIN-arm64"
+swiftc -O -target x86_64-apple-macos13.0 main.swift -o "$BIN-x86_64"
+lipo -create -output "$BIN" "$BIN-arm64" "$BIN-x86_64"
+rm "$BIN-arm64" "$BIN-x86_64"
 
 # Info.plist so macOS treats it as a proper app
 cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -21,11 +25,11 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key>            <string>Postit</string>
     <key>CFBundleDisplayName</key>     <string>Postit</string>
     <key>CFBundleIdentifier</key>      <string>com.maxoleary.postit</string>
-    <key>CFBundleVersion</key>         <string>1.0</string>
-    <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>CFBundleVersion</key>         <string>1.1</string>
+    <key>CFBundleShortVersionString</key><string>1.1</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleExecutable</key>      <string>Postit</string>
-    <key>LSMinimumSystemVersion</key>  <string>26.0</string>
+    <key>LSMinimumSystemVersion</key>  <string>13.0</string>
     <key>NSHighResolutionCapable</key> <true/>
     <key>LSUIElement</key>             <true/>
 </dict>
