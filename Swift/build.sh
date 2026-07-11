@@ -40,3 +40,11 @@ pkill -x Postit 2>/dev/null || true
 rm -rf "/Applications/$APP"
 cp -R "$APP" "/Applications/$APP"
 echo "Installed to /Applications/$APP"
+
+# Refresh the ready-to-run copy at the repo root: it ships in the repo so
+# Code -> Download ZIP hands people a double-clickable app, no build step.
+xattr -cr "$APP"
+codesign --force --deep -s - "$APP" 2>/dev/null || true
+rm -rf "../$APP"
+cp -R "$APP" "../$APP"
+echo "Refreshed ../$APP (the committed copy that ships in the download ZIP)"

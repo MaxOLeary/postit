@@ -51,12 +51,16 @@ select all, Cmd+Q quit.
 
 Requires macOS 26 (Liquid Glass APIs).
 
-**Easiest:** grab `Postit-1.0.zip` from the
-[latest release](https://github.com/MaxOLeary/postit/releases/latest), unzip,
-and drag Postit to Applications. On first launch macOS will block it (it's
-not notarized) - open System Settings → Privacy & Security and click
-**Open Anyway**, once. The app lives in the menu bar: look for the note icon
-at the top of the screen, no Dock icon.
+**Easiest - no tools needed:**
+
+1. Click the green **Code** button at the top of this page, then **Download ZIP**.
+2. Double-click the downloaded ZIP to unzip it.
+3. Inside the folder is **Postit** - drag it into your **Applications** folder.
+4. First launch only: macOS blocks apps it can't verify. Double-click Postit
+   once, then open **System Settings → Privacy & Security**, scroll down, and
+   click **Open Anyway**.
+5. That's it - look for the note icon in the menu bar at the top of the
+   screen (there's no Dock icon on purpose).
 
 **From source** (needs the Xcode command line tools):
 
