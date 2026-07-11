@@ -49,7 +49,16 @@ select all, Cmd+Q quit.
 
 ## Install
 
-Requires macOS 26 (Liquid Glass APIs) and the Xcode command line tools.
+Requires macOS 26 (Liquid Glass APIs).
+
+**Easiest:** grab `Postit-1.0.zip` from the
+[latest release](https://github.com/MaxOLeary/postit/releases/latest), unzip,
+and drag Postit to Applications. On first launch macOS will block it (it's
+not notarized) - open System Settings → Privacy & Security and click
+**Open Anyway**, once. The app lives in the menu bar: look for the note icon
+at the top of the screen, no Dock icon.
+
+**From source** (needs the Xcode command line tools):
 
 ```bash
 cd Swift && ./build.sh    # compiles main.swift and installs /Applications/Postit.app
