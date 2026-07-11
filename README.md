@@ -24,6 +24,26 @@ icon, no title bars, just a menu-bar icon and the notes themselves.
   saved note so you can reopen (or delete) any
 - Sentence auto-capitalization, style-normalized paste, per-note JSON storage
 
+## Shortcuts
+
+Typing shortcuts fire on a double-tapped capital trigger - type it twice in a
+row and both characters vanish, replaced by the action. They work in the note
+body and in section titles. Ink shortcuts color the selection if you have one,
+otherwise the ink you type with from the cursor on.
+
+| Shortcut | Action |
+| --- | --- |
+| `RR` | red ink |
+| `YY` | yellow ink |
+| `BB` | blue ink |
+| `WW` | back to default white |
+| `##` | insert a collapsible section at the cursor |
+| Shift+Up / Shift+Down | step the font size at the cursor |
+
+Plus the standard menu shortcuts: Cmd+N new note, Cmd+W close note,
+Cmd+Z / Cmd+Shift+Z undo / redo, Cmd+X / C / V / A cut / copy / paste /
+select all, Cmd+Q quit.
+
 ## Install
 
 Requires macOS 26 (Liquid Glass APIs) and the Xcode command line tools.
