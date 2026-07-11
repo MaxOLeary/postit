@@ -6,6 +6,9 @@ dependencies, no Xcode project - just AppKit and `swiftc`.
 Dark glassy notes that float on your desktop and get out of your way: no Dock
 icon, no title bars, just a menu-bar icon and the notes themselves.
 
+<img src="screenshot.png" alt="A Postit note floating over the desktop, showing colored ink shortcuts and a collapsible section" width="560">
+
+
 ## Features
 
 - **Liquid Glass** - real `NSGlassEffectView` material (macOS 26+), with a
