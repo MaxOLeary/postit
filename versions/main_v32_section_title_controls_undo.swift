@@ -350,9 +350,6 @@ final class GrowingTextView: NSTextView {
         tv.selectedTextAttributes = [
             .backgroundColor: NSColor(calibratedRed: 0.36, green: 0.52, blue: 0.92, alpha: 0.40)
         ]
-        // No system text replacement — it's what turns a double-space into a
-        // period (sentence capitalization is done in the controller instead).
-        tv.isAutomaticTextReplacementEnabled = false
         tv.textContainer?.lineFragmentPadding = 0
         tv.textContainer?.widthTracksTextView = true
         tv.textContainer?.heightTracksTextView = false
@@ -637,12 +634,8 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     private var inkRing: NSButton!
     private var inkTrayExpanded = false
     // The last single trigger character typed, so a second tap of the same one
-    // can fire its double-tap shortcut (RR/YY/BB/WW ink, ## section). When the
-    // first tap replaced a selection, `replaced` keeps that text so the fired
-    // shortcut can restore it and act on it instead of leaving it deleted —
-    // select a line, type RR, and the line turns red rather than vanishing.
-    private var pendingShortcut: (char: Character, location: Int,
-                                  tv: ObjectIdentifier, replaced: NSAttributedString?)?
+    // can fire its double-tap shortcut (RR/YY/BB/WW ink, ## section).
+    private var pendingShortcut: (char: Character, location: Int, tv: ObjectIdentifier)?
     // Set when the note is being deleted so windowWillClose skips the save.
     private var discarding = false
 
@@ -1236,90 +1229,36 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
                p.tv == ObjectIdentifier(textView),
                affectedCharRange.location == p.location + 1 {
                 pendingShortcut = nil
-                consumeShortcut(ch, in: textView, firstCharAt: p.location,
-                                restoring: p.replaced)
+                consumeShortcut(ch, in: textView, firstCharAt: p.location)
                 return false                    // swallow the second character
             }
-            let replaced = affectedCharRange.length > 0
-                ? textView.textStorage?.attributedSubstring(from: affectedCharRange)
-                : nil
-            pendingShortcut = (ch, affectedCharRange.location,
-                               ObjectIdentifier(textView), replaced)
+            pendingShortcut = (ch, affectedCharRange.location, ObjectIdentifier(textView))
         } else if replacementString?.isEmpty == false {
             pendingShortcut = nil               // any other typing breaks the pair
-        }
-
-        // Auto-capitalize sentence starts: a lowercase letter typed at the
-        // start of a block, right after a newline, or after end-of-sentence
-        // punctuation plus a space comes out uppercase.
-        if let s = replacementString, s.count == 1, let ch = s.first,
-           ch.isLowercase, !textView.hasMarkedText(),
-           startsSentence(at: affectedCharRange.location, in: textView) {
-            let upper = s.uppercased()
-            if textView.shouldChangeText(in: affectedCharRange, replacementString: upper) {
-                textView.textStorage?.replaceCharacters(
-                    in: affectedCharRange,
-                    with: NSAttributedString(string: upper,
-                                             attributes: textView.typingAttributes))
-                textView.didChangeText()
-                textView.setSelectedRange(
-                    NSRange(location: affectedCharRange.location + (upper as NSString).length,
-                            length: 0))
-                // The uppercased letter isn't a deliberate capital — don't let
-                // it arm a double-tap shortcut ("rR" must not fire red).
-                pendingShortcut = nil
-            }
-            return false
         }
         return true
     }
 
-    /// Whether a character typed at `location` begins a sentence: the start
-    /// of the block, right after a newline, or after . ! ? followed by
-    /// whitespace. Walks back over any run of spaces first.
-    private func startsSentence(at location: Int, in tv: NSTextView) -> Bool {
-        let s = tv.string as NSString
-        var i = location - 1
-        var sawSpace = false
-        while i >= 0 {
-            guard let scalar = Unicode.Scalar(s.character(at: i)) else { return false }
-            let char = Character(scalar)
-            if char == " " || char == "\t" { sawSpace = true; i -= 1; continue }
-            if char.isNewline { return true }
-            return sawSpace && ".!?".contains(char)
-        }
-        return true                             // nothing before it — block start
-    }
-
-    /// Finish a fired double-tap: swap the first trigger character (the second
-    /// was never inserted) back for whatever it replaced — a selection the
-    /// first tap deleted, or nothing — re-select that text, and run the
-    /// action, so an ink shortcut lands on the restored selection. Deferred a
-    /// tick so the text view finishes the keystroke it's mid-way through
-    /// before the storage mutates under it.
-    private func consumeShortcut(_ ch: Character, in tv: NSTextView, firstCharAt location: Int,
-                                 restoring replaced: NSAttributedString?) {
+    /// Finish a fired double-tap: remove the first trigger character (the
+    /// second was never inserted) and run the action. Deferred a tick so the
+    /// text view finishes the keystroke it's mid-way through before the
+    /// storage mutates under it.
+    private func consumeShortcut(_ ch: Character, in tv: NSTextView, firstCharAt location: Int) {
         DispatchQueue.main.async { [weak self, weak tv] in
             guard let self, let tv else { return }
-            let restored = replaced ?? NSAttributedString()
             let del = NSRange(location: location, length: 1)
             if let ts = tv.textStorage, del.upperBound <= ts.length,
-               tv.shouldChangeText(in: del, replacementString: restored.string) {
-                ts.replaceCharacters(in: del, with: restored)
+               tv.shouldChangeText(in: del, replacementString: "") {
+                ts.deleteCharacters(in: del)
                 tv.didChangeText()
+                tv.setSelectedRange(NSRange(location: location, length: 0))
             }
-            // Cursor after the restored text for ##; the text itself
-            // re-selected for the ink shortcuts so the color lands on it.
             if ch == "#" {
-                tv.setSelectedRange(NSRange(location: location + restored.length, length: 0))
                 self.insertSection()
+            } else if let inkDef = Style.inks.first(where: { $0.name.first == ch }) {
+                self.applyInk(inkDef.color)
             } else {
-                tv.setSelectedRange(NSRange(location: location, length: restored.length))
-                if let inkDef = Style.inks.first(where: { $0.name.first == ch }) {
-                    self.applyInk(inkDef.color)
-                } else {
-                    self.applyInk(nil)          // "W" — back to the default white
-                }
+                self.applyInk(nil)              // "W" — back to the default white
             }
         }
     }
@@ -1679,11 +1618,6 @@ private func makeMainMenu() -> NSMenu {
 
     return menu
 }
-
-// Kill the system's double-space → period substitution app-wide: the
-// per-view text-replacement flag doesn't cover it on every macOS build, and
-// an app-domain default beats the global System Settings pref.
-UserDefaults.standard.set(false, forKey: "NSAutomaticPeriodSubstitutionEnabled")
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)   // no Dock icon, no app-switcher tile
