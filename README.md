@@ -1,38 +1,49 @@
-# Postit Todo
+# Postit
 
-Liquid-glass desktop post-it notes for macOS.
+Native macOS post-it notes on real Liquid Glass. One Swift file, zero
+dependencies, no Xcode project - just AppKit and `swiftc`.
 
-## THE app (read this first)
+Dark glassy notes that float on your desktop and get out of your way: no Dock
+icon, no title bars, just a menu-bar icon and the notes themselves.
 
-**The real app is the Swift one: `Swift/main.swift` → `Postit.app`.**
-It's the dark glassy multi-note app Max actually runs daily (menu-bar icon,
-font stepper, note switcher, collapsible sections). When Max says "apply it
-to the app," "the postit app," or "relaunch," he means this one.
+## Features
 
-To apply a change:
+- **Liquid Glass** - real `NSGlassEffectView` material (macOS 26+), with a
+  brighter tint while focused so the glass doesn't dim under you
+- **Rich text that auto-saves** - every keystroke is debounced to disk; notes
+  restore their content, position, size, and font across launches
+- **Collapsible sections** - Obsidian-style folds with editable titles,
+  inserted at the cursor from the toolbar chevron
+- **Ink swatches** - hover the ring in the toolbar and red/yellow/blue slide
+  out; click one to color the selection and your typing from there on
+- **Double-tap shortcuts** - type `RR`, `YY`, or `BB` for ink, `WW` for white,
+  `##` for a new section; both characters vanish, replaced by the action
+- **Font stepping** - toolbar chevrons with a live size readout, or
+  Shift+Up/Down right at the cursor
+- **Multi-note** - "+" spawns another note; a menu-bar switcher lists every
+  saved note so you can reopen (or delete) any
+- Sentence auto-capitalization, style-normalized paste, per-note JSON storage
+
+## Install
+
+Requires macOS 26 (Liquid Glass APIs) and the Xcode command line tools.
 
 ```bash
-# 1. edit Swift/main.swift
-# 2. build + install + relaunch (script kills the running app and
-#    reinstalls to /Applications/Postit.app):
-cd Swift && ./build.sh
+cd Swift && ./build.sh    # compiles main.swift and installs /Applications/Postit.app
 open /Applications/Postit.app
-# 3. snapshot the new version:
-cp Swift/main.swift versions/main_v<N>_<feature>.swift
 ```
 
-Notes are saved per-note as JSON (with base64 RTF bodies, so rich text and
-colors persist) under `~/Library/Application Support/Postit/notes/`.
+Notes are stored one JSON file each (rich text as base64 RTF) under
+`~/Library/Application Support/Postit/notes/`.
 
-## The Python version (prototype, NOT the app)
+## Repo layout
 
-`postit.py` (launched by `Postit.command`) is the earlier PySide6 prototype.
-It still works and sometimes gets features first as a sketch, but shipping a
-feature means porting it to `Swift/main.swift` and rebuilding. Its note lives
-in `note.json` next to the script.
+- `Swift/main.swift` - the entire app
+- `Swift/build.sh` - compile + install script
+- `versions/` - one snapshot per milestone, the app's full history at a glance
+- `postit.py` - the earlier PySide6 prototype the Swift app grew out of
+  (`Postit.command` launches it; `requirements.txt` covers it)
 
-## Versions
+## License
 
-`versions/` holds a snapshot per milestone: `postit_v*.py` for the Python
-line, `main_v*.swift` for the Swift line (current as of v29: ink swatches).
-Snapshot before/after meaningful changes so any state is recoverable.
+MIT
