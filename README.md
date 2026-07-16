@@ -79,6 +79,14 @@ open /Applications/Postit.app
 Notes are stored one JSON file each (rich text as base64 RTF) under
 `~/Library/Application Support/Postit/notes/`.
 
+Optional: keep a readable Markdown copy of every note in a folder of your
+choice (sections become `##` headers). One-way - the JSON stays the source of
+truth, since Markdown can't hold the ink colors and font sizes:
+
+```bash
+defaults write com.maxoleary.postit MDMirrorFolder ~/wherever/notes
+```
+
 ## Repo layout
 
 - `Swift/main.swift` - the entire app

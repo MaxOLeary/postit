@@ -2,3 +2,5 @@
 __pycache__/
 Swift/Postit.app/
 note.json
+# a local Markdown mirror of your notes, if you point MDMirrorFolder here
+/notes/

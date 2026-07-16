@@ -558,6 +558,12 @@ final class SectionView: NSView, NSTextFieldDelegate {
     private func build(block: Block, fontSize: CGFloat) {
         disclosure = chromeSymbolButton("chevron.down", point: 9, target: self, action: #selector(toggle))
         disclosure.setContentHuggingPriority(.required, for: .horizontal)
+        // A comfortably larger hitbox than the 9pt glyph itself — the fold
+        // toggle gets hit constantly and shouldn't demand pixel aim.
+        NSLayoutConstraint.activate([
+            disclosure.widthAnchor.constraint(equalToConstant: 24),
+            disclosure.heightAnchor.constraint(equalToConstant: 22),
+        ])
         updateDisclosureImage()
 
         titleField.stringValue = block.title
@@ -763,6 +769,12 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     // select a line, type RR, and the line turns red rather than vanishing.
     private var pendingShortcut: (char: Character, location: Int,
                                   tv: ObjectIdentifier, replaced: NSAttributedString?)?
+    // Sentence auto-cap bypass, the delete-and-retype pattern: `lastAutoCap`
+    // remembers where the auto-capital just fired; backspacing that letter
+    // arms `autoCapBypass`, and the next letter typed right there is left
+    // exactly as typed (lowercase stays lowercase).
+    private var lastAutoCap: (tv: ObjectIdentifier, location: Int)?
+    private var autoCapBypass: (tv: ObjectIdentifier, location: Int)?
     // Set when the note is being deleted so windowWillClose skips the save.
     private var discarding = false
     // Pending hover-to-wake: armed on mouse enter, cancelled on exit.
@@ -1593,12 +1605,29 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             pendingShortcut = nil               // any other typing breaks the pair
         }
 
+        // Backspacing the letter the auto-cap just uppercased reads as
+        // "I wanted lowercase" — arm the one-shot bypass for that spot.
+        let tvID = ObjectIdentifier(textView)
+        if replacementString?.isEmpty == true, affectedCharRange.length == 1,
+           let cap = lastAutoCap, cap.tv == tvID,
+           cap.location == affectedCharRange.location {
+            autoCapBypass = cap
+            lastAutoCap = nil
+        }
+
         // Auto-capitalize sentence starts: a lowercase letter typed at the
         // start of a block, right after a newline, or after end-of-sentence
         // punctuation plus a space comes out uppercase.
         if let s = replacementString, s.count == 1, let ch = s.first,
            ch.isLowercase, !textView.hasMarkedText(),
            startsSentence(at: affectedCharRange.location, in: textView) {
+            // The bypass: this exact spot just had its auto-capital deleted,
+            // so this letter goes in untouched.
+            if let bp = autoCapBypass, bp.tv == tvID,
+               bp.location == affectedCharRange.location {
+                autoCapBypass = nil
+                return true
+            }
             let upper = s.uppercased()
             if textView.shouldChangeText(in: affectedCharRange, replacementString: upper) {
                 textView.textStorage?.replaceCharacters(
@@ -1612,6 +1641,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
                 // The uppercased letter isn't a deliberate capital — don't let
                 // it arm a double-tap shortcut ("rR" must not fire red).
                 pendingShortcut = nil
+                lastAutoCap = (tvID, affectedCharRange.location)
             }
             return false
         }
