@@ -32,9 +32,7 @@ private enum Style {
     static let gripHeight:     CGFloat = 14
     static let dockZoneWidth:  CGFloat = 56
     static let separatorColor  = NSColor(calibratedWhite: 1.0, alpha: 0.14)
-    // Peak of the dock-glow gradient — brightest at the note's edge, fading
-    // to clear toward the content.
-    static let dockGlowColor   = NSColor(calibratedWhite: 1.0, alpha: 0.30)
+    static let dockGlowColor   = NSColor(calibratedWhite: 1.0, alpha: 0.18)
     // Two tints: the calm look when idle, and a brighter one while focused to
     // counteract macOS dimming the glass on the active window.
     static let idleTint       = NSColor(calibratedWhite: 0.16, alpha: 0.18)
@@ -372,16 +370,12 @@ private final class NoteColumn {
         view.addSubview(scroll)
     }
 
-    /// Place the grip (when visible) and the scroll inside the wrapper. The
-    /// grip is a small target in the column's top-right corner, so the rest of
-    /// the column's top edge still drags the whole window.
+    /// Place the grip (when visible) and the scroll inside the wrapper.
     func layout(gripVisible: Bool) {
         grip.isHidden = !gripVisible
         let gripH = gripVisible ? Style.gripHeight : 0
-        let gripW: CGFloat = 40
-        grip.frame = NSRect(x: max(view.bounds.width - gripW, 0),
-                            y: view.bounds.height - Style.gripHeight,
-                            width: gripW, height: Style.gripHeight)
+        grip.frame = NSRect(x: 0, y: view.bounds.height - Style.gripHeight,
+                            width: view.bounds.width, height: Style.gripHeight)
         scroll.frame = NSRect(x: 0, y: 0, width: view.bounds.width,
                               height: view.bounds.height - gripH)
     }
@@ -765,8 +759,6 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
                                   tv: ObjectIdentifier, replaced: NSAttributedString?)?
     // Set when the note is being deleted so windowWillClose skips the save.
     private var discarding = false
-    // Pending hover-to-wake: armed on mouse enter, cancelled on exit.
-    private var hoverWake: DispatchWorkItem?
 
     init(data: NoteData, manager: NotesManager) {
         self.id = data.id
@@ -880,22 +872,16 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         inkRing.toolTip = "Default white — click to clear the ink"
         strip.addSubview(inkRing)
 
-        // Opening is deliberate: only hovering the ring itself slides the
-        // swatches out. Both zones are click-through, so the ring and swatch
-        // buttons underneath still get every click.
-        let ringZone = HoverZone(frame: inkRing.frame.insetBy(dx: -4, dy: -6))
-        ringZone.autoresizingMask = [.maxXMargin, .minYMargin]
-        ringZone.onEnter = { [weak self] in self?.setInkTray(expanded: true) }
-        strip.addSubview(ringZone)
-
-        // The wider zone spanning the slid-out swatches only keeps the open
-        // tray alive while the mouse travels across it; leaving collapses it.
+        // hover zone spanning the ring plus the slid-out swatches: entering
+        // opens the tray, leaving collapses it. Click-through, so the ring and
+        // swatch buttons underneath still get every click.
         let trayWidth = 18 + CGFloat(Style.inks.count - 1) * 17 + 12   // ring gap + dots
         let trayZone = HoverZone(frame: NSRect(x: ringX - 4, y: 0,
                                                width: trayWidth + 12,
                                                height: Style.stripHeight))
         trayZone.autoresizingMask = [.maxXMargin, .minYMargin]
-        trayZone.onExit = { [weak self] in self?.setInkTray(expanded: false) }
+        trayZone.onEnter = { [weak self] in self?.setInkTray(expanded: true) }
+        trayZone.onExit  = { [weak self] in self?.setInkTray(expanded: false) }
         strip.addSubview(trayZone)
 
         for (i, inkDef) in Style.inks.enumerated() {
@@ -947,29 +933,6 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         }
         layoutColumns()
 
-        // Focus follows the mouse: resting the cursor on a note for a beat
-        // wakes it — no click needed after visiting another app (becoming key
-        // also restores the text cursor, via restoreCursor). The dwell keeps a
-        // mouse just passing through from yanking the keyboard mid-typing.
-        let wakeZone = HoverZone(frame: container.bounds)
-        wakeZone.autoresizingMask = [.width, .height]
-        wakeZone.onEnter = { [weak self] in
-            guard let self, !self.window.isKeyWindow else { return }
-            let work = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                NSApp.activate(ignoringOtherApps: true)
-                self.window.makeKeyAndOrderFront(nil)
-            }
-            self.hoverWake?.cancel()
-            self.hoverWake = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
-        }
-        wakeZone.onExit = { [weak self] in
-            self?.hoverWake?.cancel()
-            self?.hoverWake = nil
-        }
-        container.addSubview(wakeZone)
-
         if #available(macOS 26.0, *), let g = glass as? NSGlassEffectView {
             g.contentView = container
         } else {
@@ -980,11 +943,10 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         window.contentView = glass
         window.delegate = self
 
-        // position: restore saved frame (pulled back onto a screen), else center
+        // position: restore saved frame, else center
         if data.frame.count == 4 {
-            let saved = NSRect(x: data.frame[0], y: data.frame[1],
-                               width: data.frame[2], height: data.frame[3])
-            window.setFrame(NoteController.onScreen(saved), display: false)
+            window.setFrame(NSRect(x: data.frame[0], y: data.frame[1],
+                                   width: data.frame[2], height: data.frame[3]), display: false)
         } else {
             window.center()
         }
@@ -1005,22 +967,6 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     }
 
     deinit { NotificationCenter.default.removeObserver(self) }
-
-    /// Pull a saved frame back onto a screen, so a note can never restore to a
-    /// spot you can't reach (a display that's gone, or a frame that a buggy
-    /// drag once saved off-screen). "On screen" means at least a ~40pt band of
-    /// the note is visible somewhere.
-    private static func onScreen(_ f: NSRect) -> NSRect {
-        let screens = NSScreen.screens
-        if screens.contains(where: { $0.visibleFrame.intersects(f.insetBy(dx: 40, dy: 40)) }) {
-            return f
-        }
-        guard let vis = (NSScreen.main ?? screens.first)?.visibleFrame else { return f }
-        var g = f
-        g.origin.x = min(max(g.origin.x, vis.minX), max(vis.maxX - g.width, vis.minX))
-        g.origin.y = min(max(g.origin.y, vis.minY), max(vis.maxY - g.height, vis.minY))
-        return g
-    }
 
     /// If the selection landed in the field editor of one of our section
     /// titles, mark that section active and show its font size in the readout.
@@ -1116,10 +1062,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     /// Tear a column out into its own free-floating note (un-join): remove it
     /// from this window, shrink to fit what's left, and spawn a new note under
-    /// the cursor that follows the mouse until the button lifts. The follow is
-    /// a manual tracking loop on this window's event stream — handing the drag
-    /// to the new window (performDrag) flings it, because the gesture's events
-    /// live in this window's coordinates.
+    /// the cursor carrying the column's blocks — continuing the drag gesture.
     private func dragOutColumn(_ col: NoteColumn, with event: NSEvent) {
         guard columns.count > 1, let idx = columns.firstIndex(where: { $0 === col }) else { return }
         let blocks = blockViews(in: col).map { $0.asBlock() }
@@ -1138,26 +1081,9 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         layoutColumns()
         saveDebounced()
 
-        guard let fresh = manager?.spawnExtractedNote(
-            blocks: blocks, fontSize: fontSize,
-            size: NSSize(width: colW, height: f.height)) else { return }
-
-        // Ride out the rest of the gesture: keep the new note glued under the
-        // cursor until the button lifts. Docking stays suppressed so the torn
-        // column can't instantly re-merge into the note it just left.
-        let newWin = fresh.windowRef
-        let size = newWin.frame.size
-        manager?.dockingSuppressed = true
-        while NSEvent.pressedMouseButtons & 1 != 0 {
-            _ = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp],
-                                 until: Date().addingTimeInterval(0.03),
-                                 inMode: .eventTracking, dequeue: true)
-            let m = NSEvent.mouseLocation
-            newWin.setFrameOrigin(NSPoint(x: m.x - size.width / 2,
-                                          y: m.y - size.height + 20))
-        }
-        manager?.dockingSuppressed = false
-        fresh.focus()
+        manager?.spawnExtractedNote(blocks: blocks, fontSize: fontSize,
+                                    size: NSSize(width: colW, height: f.height),
+                                    event: event)
     }
 
     /// The note's content as per-column block lists (for a dock-merge handoff).
@@ -1182,24 +1108,18 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         saveDebounced()
     }
 
-    /// Show (or clear, with nil) the edge glow that marks where a dragged note
-    /// will dock when released: a gradient, brightest at the edge and fading
-    /// inward toward the content.
+    /// Show (or clear, with nil) the translucent edge band that marks where a
+    /// dragged note will dock when released.
     func showDockGlow(_ side: DockSide?) {
         dockGlow?.removeFromSuperview()
         guard let side else { return }
-        let grad = CAGradientLayer()
-        grad.colors = [Style.dockGlowColor.cgColor,
-                       Style.dockGlowColor.withAlphaComponent(0).cgColor]
-        grad.startPoint = CGPoint(x: side == .left ? 0 : 1, y: 0.5)
-        grad.endPoint   = CGPoint(x: side == .left ? 1 : 0, y: 0.5)
-        grad.cornerRadius = Style.cornerRadius
-        grad.maskedCorners = side == .left
+        let v = NSView()
+        v.wantsLayer = true
+        v.layer?.backgroundColor = Style.dockGlowColor.cgColor
+        v.layer?.cornerRadius = Style.cornerRadius
+        v.layer?.maskedCorners = side == .left
             ? [.layerMinXMinYCorner, .layerMinXMaxYCorner]
             : [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
-        let v = NSView()
-        v.layer = grad
-        v.wantsLayer = true
         let b = container.bounds
         let x = side == .left ? 0 : b.width - Style.dockZoneWidth
         v.frame = NSRect(x: x, y: 0, width: Style.dockZoneWidth, height: b.height)
@@ -1771,29 +1691,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     }
 
     // ---- window delegate ----
-    func windowDidBecomeKey(_ notification: Notification) {
-        applyTint(focused: true)
-        restoreCursor()
-    }
-
-    /// Coming back from another app puts the cursor right back where it was —
-    /// no re-clicking into the text and hunting for your spot. The text view
-    /// keeps its selection while the window is idle; this just re-arms it as
-    /// first responder and scrolls the caret into view. A section title gets
-    /// its cursor parked at the end instead (re-focusing a text field selects
-    /// everything, and typing would then wipe the title).
-    private func restoreCursor() {
-        if let s = activeTitleSection {
-            s.focusTitle()
-            if let ed = window.fieldEditor(false, for: nil) as? NSTextView {
-                ed.setSelectedRange(NSRange(location: (ed.string as NSString).length, length: 0))
-            }
-            return
-        }
-        guard let tv = activeText, tv.window === window else { return }
-        if window.firstResponder !== tv { window.makeFirstResponder(tv) }
-        tv.scrollRangeToVisible(tv.selectedRange())
-    }
+    func windowDidBecomeKey(_ notification: Notification) { applyTint(focused: true) }
 
     func windowDidResignKey(_ notification: Notification) {
         applyTint(focused: false)
@@ -1843,9 +1741,6 @@ final class NotesManager: NSObject, NSMenuDelegate {
     private weak var draggingNote: NoteController?
     private var dockTimer: Timer?
     private var dockCandidate: (target: NoteController, side: DockSide)?
-    // Set during a tear-out drag so the freshly extracted note can't dock
-    // straight back into the note it was just pulled from.
-    var dockingSuppressed = false
 
     func start() {
         setupStatusItem()
@@ -1871,8 +1766,7 @@ final class NotesManager: NSObject, NSMenuDelegate {
     /// polling is the one reliable way to see both the hover and the release —
     /// windowDidMove stops firing whenever the mouse pauses.
     func noteDidMove(_ c: NoteController) {
-        guard !dockingSuppressed,
-              NSEvent.pressedMouseButtons & 1 != 0 else { return }  // programmatic setFrame
+        guard NSEvent.pressedMouseButtons & 1 != 0 else { return }  // programmatic setFrame
         draggingNote = c
         guard dockTimer == nil else { return }
         let t = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
@@ -1889,24 +1783,21 @@ final class NotesManager: NSObject, NSMenuDelegate {
             finishDrag()
             return
         }
-        // Magnet test on the windows themselves, not the mouse: the dragged
-        // note's near edge sitting over (or within a small gap of) a target's
-        // edge — with real vertical overlap — reads as "wants to join". The
-        // mouse can be anywhere on the dragged note.
-        let df = dragged.windowRef.frame
+        let mouse = NSEvent.mouseLocation
         var found: (NoteController, DockSide)?
         // Front-to-back (orderedIndex 0 is frontmost — NSApp.orderedWindows
         // can omit panels), so stacked notes resolve to the one on top.
         for target in controllers.sorted(by: { $0.windowRef.orderedIndex < $1.windowRef.orderedIndex }) {
             guard target !== dragged, target.windowRef.isVisible else { continue }
             let f = target.windowRef.frame
-            let overlapY = min(df.maxY, f.maxY) - max(df.minY, f.minY)
-            guard overlapY >= min(60, min(df.height, f.height) / 3) else { continue }
-            // Dragged sits to the right: its left edge anywhere from the
-            // target's midline to a 40pt gap past its right edge.
-            if df.minX > f.midX, df.minX < f.maxX + 40 { found = (target, .right); break }
-            // Mirrored for the left side.
-            if df.maxX < f.midX, df.maxX > f.minX - 40 { found = (target, .left); break }
+            if NSRect(x: f.minX, y: f.minY,
+                      width: Style.dockZoneWidth, height: f.height).contains(mouse) {
+                found = (target, .left); break
+            }
+            if NSRect(x: f.maxX - Style.dockZoneWidth, y: f.minY,
+                      width: Style.dockZoneWidth, height: f.height).contains(mouse) {
+                found = (target, .right); break
+            }
         }
         if dockCandidate?.target !== found?.0 || dockCandidate?.side != found?.1 {
             dockCandidate?.target.showDockGlow(nil)
@@ -1945,9 +1836,8 @@ final class NotesManager: NSObject, NSMenuDelegate {
     }
 
     /// A column torn out of a conjoined note becomes its own note under the
-    /// cursor. The caller (dragOutColumn) keeps it following the mouse.
-    @discardableResult
-    func spawnExtractedNote(blocks: [Block], fontSize: CGFloat, size: NSSize) -> NoteController {
+    /// cursor, continuing the drag gesture where possible.
+    func spawnExtractedNote(blocks: [Block], fontSize: CGFloat, size: NSSize, event: NSEvent) {
         var data = NoteData(id: UUID().uuidString, fontSize: fontSize, blocks: blocks)
         let mouse = NSEvent.mouseLocation
         data.frame = [mouse.x - size.width / 2, mouse.y - size.height + 20,
@@ -1955,7 +1845,7 @@ final class NotesManager: NSObject, NSMenuDelegate {
         let c = open(data)
         c.flush()                               // its file exists on disk right away
         c.windowRef.makeKeyAndOrderFront(nil)
-        return c
+        c.windowRef.performDrag(with: event)    // keep riding the same gesture
     }
 
     // MARK: menu-bar switcher
