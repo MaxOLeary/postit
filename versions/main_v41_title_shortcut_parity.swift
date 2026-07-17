@@ -35,6 +35,9 @@ private enum Style {
     static let minColumnWidth: CGFloat = 160
     static let gripHeight:     CGFloat = 14
     static let dockZoneWidth:  CGFloat = 56
+    // How long a note must hover over another's edge before the merge arms —
+    // a drag just passing through should never conjoin.
+    static let dockDwell: TimeInterval = 0.9
     static let separatorColor  = NSColor(calibratedWhite: 1.0, alpha: 0.14)
     // Peak of the dock-glow gradient — brightest at the note's edge, fading
     // to clear toward the content.
@@ -2004,7 +2007,10 @@ final class NotesManager: NSObject, NSMenuDelegate {
     // and the note edge currently glowing as the merge target.
     private weak var draggingNote: NoteController?
     private var dockTimer: Timer?
-    private var dockCandidate: (target: NoteController, side: DockSide)?
+    // The edge currently hovered. It only becomes a merge (and only glows)
+    // once it has been held for Style.dockDwell — `armed`.
+    private var dockCandidate: (target: NoteController, side: DockSide,
+                                since: Date, armed: Bool)?
     // Set during a tear-out drag so the freshly extracted note can't dock
     // straight back into the note it was just pulled from.
     var dockingSuppressed = false
@@ -2071,14 +2077,25 @@ final class NotesManager: NSObject, NSMenuDelegate {
             // Mirrored for the left side.
             if df.maxX < f.midX, df.maxX > f.minX - 40 { found = (target, .left); break }
         }
-        if dockCandidate?.target !== found?.0 || dockCandidate?.side != found?.1 {
+        if let f = found {
+            if let c = dockCandidate, c.target === f.0, c.side == f.1 {
+                // Same edge, still held: arm (and glow) after the dwell.
+                if !c.armed, Date().timeIntervalSince(c.since) >= Style.dockDwell {
+                    dockCandidate?.armed = true
+                    f.0.showDockGlow(f.1)
+                }
+            } else {
+                // New edge: the dwell clock starts over.
+                dockCandidate?.target.showDockGlow(nil)
+                dockCandidate = (f.0, f.1, Date(), false)
+            }
+        } else {
             dockCandidate?.target.showDockGlow(nil)
-            dockCandidate = found.map { (target: $0.0, side: $0.1) }
-            dockCandidate?.target.showDockGlow(dockCandidate?.side)
+            dockCandidate = nil
         }
     }
 
-    /// The drag ended (mouse up). If it ended over a dock zone, merge.
+    /// The drag ended (mouse up). Merge only if the hover armed (glowing).
     private func finishDrag() {
         dockTimer?.invalidate()
         dockTimer = nil
@@ -2087,8 +2104,8 @@ final class NotesManager: NSObject, NSMenuDelegate {
         candidate?.target.showDockGlow(nil)
         let dragged = draggingNote
         draggingNote = nil
-        guard let dragged, let (target, side) = candidate else { return }
-        commitMerge(dragged: dragged, into: target, side: side)
+        guard let dragged, let c = candidate, c.armed else { return }
+        commitMerge(dragged: dragged, into: c.target, side: c.side)
     }
 
     /// Conjoin: the dragged note's columns join `target` on `side`, the window

@@ -25,12 +25,14 @@ icon, no title bars, just a menu-bar icon and the notes themselves.
   Shift+Up/Down right at the cursor
 - **Multi-note** - "+" spawns another note; a menu-bar switcher lists every
   saved note so you can reopen (or delete) any
-- **Conjoinable notes** - drag a note onto another's edge (the edge glows) and
-  they merge into one window with side-by-side columns; grab the pill at a
-  column's top-right corner to pull it back out into its own note
+- **Conjoinable notes** - drag a note onto another's edge and hold for a
+  moment; the edge glows, and releasing merges them into one window with
+  side-by-side columns. Grab the pill at a column's top-right corner to pull
+  it back out into its own note
 - **Hover to wake** - rest the pointer on an idle note and it takes focus with
   the cursor right where you left it, no clicking back in
-- Sentence auto-capitalization, style-normalized paste, per-note JSON storage
+- Sentence auto-capitalization (hold Shift while typing the letter to keep it
+  lowercase), style-normalized paste, per-note JSON storage
 
 ## Shortcuts
 
