@@ -93,6 +93,8 @@ defaults write com.maxoleary.postit MDMirrorFolder ~/wherever/notes
 
 - `Swift/main.swift` - the entire app
 - `Swift/build.sh` - compile + install script
+- `PORTING.md` - platform-independent spec (look, behaviors, data format)
+  for rebuilding the app on Windows or Linux
 - `versions/` - one snapshot per milestone, the app's full history at a glance
 - `postit.py` - the earlier PySide6 prototype the Swift app grew out of
   (`Postit.command` launches it; `requirements.txt` covers it)

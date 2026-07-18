@@ -11,28 +11,6 @@
 // size at the cursor. Every note remembers its
 // blocks, font size, and position across launches. A menu-bar item lists every
 // saved note so you can reopen (or delete) any. Zero runtime dependencies.
-//
-// ── File map ─────────────────────────────────────────────────────────────
-// One file on purpose: this plus PORTING.md (repo root) is the whole app.
-// Sections, in order (jump by MARK):
-//
-//   Look & feel      Style — every color, size, font, and timing constant
-//   Chrome helpers   shared button / hover-zone builders for the toolbar
-//   Model            Block + NoteData, the entire saved-note data model
-//   Persistence      NoteStore: per-note JSON on disk + the Markdown mirror
-//   Window           GlassWindow, the borderless key-taking panel
-//   Block views      column plumbing (grip, divider) and the two block view
-//                    types (growing text view, collapsible section)
-//   One note         NoteController — builds a window, owns its columns,
-//                    routes every editing behavior (typing shortcuts,
-//                    auto-cap, ink-follows-cursor), snapshots to NoteData
-//   Manager          NotesManager — all open notes, drag-to-dock
-//                    conjoining, the menu-bar switcher
-//   App / Boot       AppDelegate + entry point
-//
-// Porting: PORTING.md specs the look, behaviors, and data format
-// platform-independently and maps each macOS-only API to an acceptable
-// substitute — start there before rebuilding this on another OS.
 
 import Cocoa
 
@@ -1250,7 +1228,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         sizeLabel.stringValue = "\(Int(round(section.titleFontSize)))"
     }
 
-    // MARK: block view factories
+    // ---- block management ----
 
     private func makeTextView(from block: Block) -> GrowingTextView {
         let tv = GrowingTextView.make(delegate: self, fontSize: fontSize)
@@ -1270,7 +1248,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
                     })
     }
 
-    // MARK: columns & dividers
+    // ---- columns ----
 
     /// Build one column and populate it with block views.
     private func makeColumn(blocks: [Block]) -> NoteColumn {
@@ -1507,7 +1485,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         return columns[0]
     }
 
-    // MARK: block management
+    // ---- block management ----
 
     /// One column's blocks in order, viewed through the BlockView protocol so
     /// callers never type-switch on the concrete view class.
@@ -1677,7 +1655,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         return b
     }
 
-    // MARK: state → NoteData
+    // ---- state → NoteData ----
     private func snapshot() -> NoteData {
         let f = window.frame
         // A single column saves as plain `blocks` — the same shape as before
@@ -1700,7 +1678,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         }
     }
 
-    // MARK: toolbar actions & ink
+    // ---- actions ----
     @objc private func newNote() { manager?.newNote() }
 
     @objc private func fontUp()   { changeFont(by: +1) }
@@ -1869,7 +1847,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         if let tv = activeText ?? firstTextView() { window.makeFirstResponder(tv) }
     }
 
-    // MARK: text delegate (typing shortcuts, auto-cap, ink)
+    // ---- text delegate (shared by every block's text view) ----
     func textDidChange(_ notification: Notification) {
         if let tv = notification.object as? NSTextView { activeText = tv }
         saveDebounced()
@@ -2135,7 +2113,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         sizeLabel.stringValue = "\(Int(round(f.pointSize)))"
     }
 
-    // MARK: window delegate
+    // ---- window delegate ----
     func windowDidBecomeKey(_ notification: Notification) {
         applyTint(focused: true)
         restoreCursor()
