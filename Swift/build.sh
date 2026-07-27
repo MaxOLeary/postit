@@ -38,17 +38,34 @@ PLIST
 
 echo "Built $APP"
 
-# Install the fresh build into /Applications (the stable home the desktop
-# shortcut and login item point at). Edit main.swift, run ./build.sh, done.
+# Sign before installing. macOS remembers privacy grants (Desktop, Downloads,
+# etc.) by code signature, and an ad-hoc signature changes on every build -
+# which resets those permissions after each rebuild. A local "Postit Dev"
+# certificate keeps the signature stable so grants stick; fall back to ad-hoc
+# on machines without it (e.g. building from a ZIP download).
+#
+# Signing happens in a temp dir because this repo lives in an iCloud-synced
+# folder: fileproviderd re-stamps Finder metadata between cleanup and signing,
+# and codesign rejects the bundle ("Finder information ... not allowed").
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+cp -R "$APP" "$STAGE/$APP"
+xattr -cr "$STAGE/$APP"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q '"Postit Dev"'; then
+    codesign --force -s "Postit Dev" "$STAGE/$APP"
+else
+    codesign --force -s - "$STAGE/$APP"
+fi
+
+# Install the fresh signed build into /Applications (the stable home the
+# desktop shortcut and login item point at). Edit main.swift, ./build.sh, done.
 pkill -x Postit 2>/dev/null || true
 rm -rf "/Applications/$APP"
-cp -R "$APP" "/Applications/$APP"
+cp -R "$STAGE/$APP" "/Applications/$APP"
 echo "Installed to /Applications/$APP"
 
 # Refresh the ready-to-run copy at the repo root: it ships in the repo so
 # Code -> Download ZIP hands people a double-clickable app, no build step.
-xattr -cr "$APP"
-codesign --force --deep -s - "$APP" 2>/dev/null || true
 rm -rf "../$APP"
-cp -R "$APP" "../$APP"
+cp -R "$STAGE/$APP" "../$APP"
 echo "Refreshed ../$APP (the committed copy that ships in the download ZIP)"

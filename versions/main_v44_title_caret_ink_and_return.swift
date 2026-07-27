@@ -46,9 +46,6 @@ private enum Style {
     static let defaultFont:   CGFloat = 15
     static let minFont:       CGFloat = 10
     static let maxFont:       CGFloat = 40
-    /// The size readout shows a 1-based rank (smallest size = 1) instead of the
-    /// raw point size, so the scale reads 1, 2, 3, … up from the minimum.
-    static func sizeRank(_ size: CGFloat) -> Int { Int(round(size)) - Int(minFont) + 1 }
     static let textColor      = NSColor(calibratedWhite: 0.97, alpha: 1.0)
     static let chromeColor    = NSColor(calibratedWhite: 1.0, alpha: 0.55)
     // Selection fill shared by the body text views and the title field
@@ -91,24 +88,6 @@ private enum Style {
     /// The color of a named swatch, or the default white for nil/unknown.
     static func inkColor(named name: String?) -> NSColor {
         inks.first { $0.name == name }?.color ?? textColor
-    }
-
-    /// The ink swatch a color corresponds to (within a small tolerance, so a
-    /// color that round-tripped through RTF on the pasteboard still matches),
-    /// or nil for anything that isn't one of our swatches — foreign colors
-    /// pasted from other apps included. Lets a paste keep Postit ink while
-    /// neutralizing outside colors.
-    static func matchedInk(_ color: NSColor?) -> NSColor? {
-        guard let c = color?.usingColorSpace(.genericRGB) else { return nil }
-        for ink in inks {
-            guard let ic = ink.color.usingColorSpace(.genericRGB) else { continue }
-            if abs(ic.redComponent - c.redComponent) < 0.06,
-               abs(ic.greenComponent - c.greenComponent) < 0.06,
-               abs(ic.blueComponent - c.blueComponent) < 0.06 {
-                return ink.color
-            }
-        }
-        return nil
     }
 
     /// Every character that can arm a double-tap shortcut: the ink initials
@@ -659,38 +638,12 @@ final class GrowingTextView: NSTextView {
     /// Keeps the size/font at the cursor and the current typing ink (the
     /// default white unless a swatch is active).
     override func paste(_ sender: Any?) {
-        let pb = NSPasteboard.general
-        let font = (typingAttributes[.font] as? NSFont) ?? NSFont.systemFont(ofSize: Style.defaultFont)
-        let color = (typingAttributes[.foregroundColor] as? NSColor) ?? Style.textColor
-
-        // Rich paste: copy red (or any ink) text from one note into another and
-        // it stays that color. Keep every run's foreground color when it's one
-        // of our ink swatches; anything else — foreign colors from a browser or
-        // another app — collapses to the ink at the cursor. The font/size is
-        // always forced to the note's own so nothing drags in a stray typeface.
-        if let data = pb.data(forType: .rtf),
-           let rich = NSAttributedString(rtf: data, documentAttributes: nil), rich.length > 0 {
-            let styled = NSMutableAttributedString(attributedString: rich)
-            let whole = NSRange(location: 0, length: styled.length)
-            styled.enumerateAttribute(.foregroundColor, in: whole, options: []) { value, range, _ in
-                styled.addAttribute(.foregroundColor,
-                                    value: Style.matchedInk(value as? NSColor) ?? color,
-                                    range: range)
-            }
-            styled.addAttribute(.font, value: font, range: whole)
-            let range = selectedRange()
-            if shouldChangeText(in: range, replacementString: styled.string) {
-                textStorage?.replaceCharacters(in: range, with: styled)
-                setSelectedRange(NSRange(location: range.location + styled.length, length: 0))
-                didChangeText()
-            }
-            return
-        }
-
-        guard let plain = pb.string(forType: .string) else {
+        guard let plain = NSPasteboard.general.string(forType: .string) else {
             super.paste(sender)
             return
         }
+        let font = (typingAttributes[.font] as? NSFont) ?? NSFont.systemFont(ofSize: Style.defaultFont)
+        let color = (typingAttributes[.foregroundColor] as? NSColor) ?? Style.textColor
         let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
         let styled = NSAttributedString(string: plain, attributes: attrs)
         let range = selectedRange()
@@ -737,8 +690,6 @@ final class SectionView: NSView, NSTextFieldDelegate {
     private var titlePrev: (text: String, sel: NSRange) = ("", NSRange())
     private var titleCur:  (text: String, sel: NSRange) = ("", NSRange())
     private var pendingTitleShortcut: (char: Character, location: Int, replaced: String)?
-    // Guards the re-entrant text change our own auto-capitalize edit provokes.
-    private var applyingTitleCase = false
 
     init(block: Block, fontSize: CGFloat, textDelegate: NSTextViewDelegate,
          onChange: @escaping () -> Void,
@@ -847,52 +798,8 @@ final class SectionView: NSView, NSTextFieldDelegate {
     }
 
     func controlTextDidChange(_ obj: Notification) {
-        if applyingTitleCase { return }   // skip the echo of our own case edit
         detectTitleShortcut()
-        autoCapitalizeTitle()
         onChange()
-    }
-
-    /// Auto-capitalize sentence starts in the header, the same as the body
-    /// blocks: a lowercase letter typed at the start of the title (or after
-    /// . ! ? plus a space) comes out uppercase. Runs after the shortcut check
-    /// so an uppercase ink trigger (RR/YY/BB/WW) is never disturbed — only
-    /// freshly typed lowercase letters are touched. The title edits through the
-    /// window's shared field editor, which doesn't route the NSTextView change
-    /// hook the body uses, so this lives here and diffs against the snapshot.
-    private func autoCapitalizeTitle() {
-        guard let ed = titleField.currentEditor() as? NSTextView,
-              !ed.hasMarkedText() else { return }
-        let text = ed.string as NSString
-        let sel = ed.selectedRange()
-        // Only a single, just-typed character right before the caret qualifies
-        // (same snapshot diff the shortcut detector uses), so pastes and edits
-        // elsewhere in the title are left alone.
-        let pre = titlePrev
-        guard sel.length == 0, sel.location >= 1,
-              sel.location == pre.sel.location + 1,
-              text.length == (pre.text as NSString).length - pre.sel.length + 1 else { return }
-        let range = NSRange(location: sel.location - 1, length: 1)
-        guard let ch = text.substring(with: range).first, ch.isLowercase,
-              titleStartsSentence(at: range.location, in: text) else { return }
-        applyingTitleCase = true
-        ed.insertText(String(ch).uppercased(), replacementRange: range)
-        applyingTitleCase = false
-    }
-
-    /// Whether a character at `location` in the title begins a sentence: the
-    /// start of the field, or after . ! ? followed by whitespace. Mirrors the
-    /// body's rule (a title is single-line, so there are no newlines to walk).
-    private func titleStartsSentence(at location: Int, in s: NSString) -> Bool {
-        var i = location - 1
-        var sawSpace = false
-        while i >= 0 {
-            guard let scalar = Unicode.Scalar(s.character(at: i)) else { return false }
-            let char = Character(scalar)
-            if char == " " || char == "\t" { sawSpace = true; i -= 1; continue }
-            return sawSpace && ".!?".contains(char)
-        }
-        return true                             // nothing before it — title start
     }
 
     /// Double-tap shortcuts inside the header — same triggers and the same
@@ -997,13 +904,6 @@ final class SectionView: NSView, NSTextFieldDelegate {
 
     /// Move keyboard focus into the title field (after inserting a new section).
     func focusTitle() { window?.makeFirstResponder(titleField) }
-
-    /// Drop pre-existing rich text into the fold's body — used when a selection
-    /// is lifted out of a text block and wrapped in a brand-new section.
-    func setBody(_ attr: NSAttributedString) {
-        body.textStorage?.setAttributedString(attr)
-        body.invalidateIntrinsicContentSize()
-    }
 
     /// Serialize back to a Block for saving.
     func asBlock() -> Block {
@@ -1181,7 +1081,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         strip.addSubview(down)
 
         // size readout — snug against the chevrons so the stepper reads as one control
-        sizeLabel = NSTextField(labelWithString: "\(Style.sizeRank(fontSize))")
+        sizeLabel = NSTextField(labelWithString: "\(Int(fontSize))")
         sizeLabel.frame = NSRect(x: 44, y: (Style.stripHeight - 16) / 2, width: 26, height: 16)
         sizeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         sizeLabel.textColor = Style.chromeColor
@@ -1366,7 +1266,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
               let section = allBlockViews.compactMap({ $0 as? SectionView })
                   .first(where: { $0.ownsTitleField(field) }) else { return }
         activeTitleSection = section
-        sizeLabel.stringValue = "\(Style.sizeRank(section.titleFontSize))"
+        sizeLabel.stringValue = "\(Int(round(section.titleFontSize)))"
         // Ink follows the cursor into headers too: landing in a colored title
         // makes its ink active so the ring/swatches track along, same as
         // landing in colored body text.
@@ -1723,13 +1623,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         let col = activeColumn
         let arranged = col.stack.arrangedSubviews
         if let tv = activeText as? GrowingTextView, let idx = arranged.firstIndex(of: tv) {
-            // A live selection in the block → lift it into a new, collapsed
-            // section and focus the header so you can title it.
-            if tv.selectedRange().length > 0 {
-                wrapSelectionInSection(in: tv, at: idx, in: col)
-            } else {
-                splitAndInsertSection(in: tv, at: idx, in: col)
-            }
+            splitAndInsertSection(in: tv, at: idx, in: col)
             return
         }
         // Cursor is in a section body (or nowhere) → insert right after that block.
@@ -1811,46 +1705,6 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         insertFreshSection(at: index + 1, in: col)
     }
 
-    /// Highlight text in a block and hit ▸: the selection is lifted out and
-    /// becomes the body of a new, collapsed section dropped in its place, with
-    /// the header focused so you can name it. Text before the selection stays in
-    /// the original block; text after it moves into a fresh block below.
-    private func wrapSelectionInSection(in tv: GrowingTextView, at index: Int, in col: NoteColumn) {
-        guard let ts = tv.textStorage else { return }
-        let sel = tv.selectedRange()
-        let selRange = NSRange(location: sel.location,
-                               length: min(sel.length, ts.length - sel.location))
-        let selected = ts.attributedSubstring(from: selRange)
-
-        // Text past the selection drops into a block below the new section.
-        let afterLoc = selRange.location + selRange.length
-        let afterAttr = ts.attributedSubstring(
-            from: NSRange(location: afterLoc, length: ts.length - afterLoc))
-
-        // Trim the original block back to the text before the selection.
-        let tailRange = NSRange(location: selRange.location, length: ts.length - selRange.location)
-        if tailRange.length > 0 {
-            ts.deleteCharacters(in: tailRange)
-            tv.invalidateIntrinsicContentSize()
-        }
-
-        let afterView = GrowingTextView.make(delegate: self, fontSize: fontSize)
-        if afterAttr.length > 0 {
-            afterView.textStorage?.setAttributedString(afterAttr)
-            afterView.invalidateIntrinsicContentSize()
-        }
-        insertBlockView(afterView, at: index + 1, in: col)
-
-        // The collapsed section holding the lifted text slots in between.
-        var block = Block(kind: .section)
-        block.collapsed = true
-        let sv = makeSectionView(from: block)
-        insertBlockView(sv, at: index + 1, in: col)
-        sv.setBody(selected)
-        sv.focusTitle()
-        saveDebounced()
-    }
-
     /// A borderless text button styled like the existing subtle "✕".
     private func chromeButton(_ title: String, size: CGFloat, fontSize: CGFloat) -> NSButton {
         let b = bareButton(frame: NSRect(x: 0, y: 0, width: size, height: size))
@@ -1911,7 +1765,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         let newSize = min(max(fontSize + delta, Style.minFont), Style.maxFont)
         guard newSize != fontSize else { return }
         fontSize = newSize
-        sizeLabel.stringValue = "\(Style.sizeRank(newSize))"
+        sizeLabel.stringValue = "\(Int(newSize))"
         currentFont = NSFont.systemFont(ofSize: newSize)
 
         guard let tv = activeText ?? firstTextView() else { saveDebounced(); return }
@@ -1930,7 +1784,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         let newSize = min(max(section.titleFontSize + delta, Style.minFont), Style.maxFont)
         guard newSize != section.titleFontSize else { return }
         section.setTitleFontSize(newSize)
-        sizeLabel.stringValue = "\(Style.sizeRank(newSize))"
+        sizeLabel.stringValue = "\(Int(round(newSize)))"
         saveDebounced()
     }
 
@@ -2331,7 +2185,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         guard let f = font else { return }
         currentFont = f
         fontSize = f.pointSize
-        sizeLabel.stringValue = "\(Style.sizeRank(f.pointSize))"
+        sizeLabel.stringValue = "\(Int(round(f.pointSize)))"
     }
 
     // MARK: window delegate
