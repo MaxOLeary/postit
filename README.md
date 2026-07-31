@@ -63,17 +63,20 @@ select all, Cmd+Q quit.
 
 ## Install
 
-Runs on macOS 13 or later, Apple Silicon and Intel. On macOS 26 the notes are
-real Liquid Glass; on older versions they fall back to a simpler translucent
-blur panel.
+Runs on macOS 11 (Big Sur) or later, Apple Silicon and Intel. On macOS 26 the
+notes are real Liquid Glass; on older versions they fall back to a simpler
+translucent blur panel.
 
 **Easiest - no tools needed:**
 
 1. Click the green **Code** button at the top of this page, then **Download ZIP**.
 2. Double-click the downloaded ZIP to unzip it.
 3. Inside the folder is **Postit** - drag it into your **Applications** folder.
-4. First launch only: macOS blocks apps it can't verify. Double-click Postit
-   once, then open **System Settings → Privacy & Security**, scroll down, and
+4. First launch only: macOS blocks apps it can't verify. Right-click (or
+   Control-click) **Postit** and choose **Open**, then click **Open** in the
+   dialog. If your macOS version doesn't offer that, double-click Postit once,
+   then allow it under **System Settings → Privacy & Security** (on Monterey
+   and earlier: **System Preferences → Security & Privacy → General**) and
    click **Open Anyway**.
 5. That's it - look for the note icon in the menu bar at the top of the
    screen (there's no Dock icon on purpose).

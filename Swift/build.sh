@@ -9,10 +9,12 @@ BIN="$APP/Contents/MacOS/Postit"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 
-# compile - universal (Apple Silicon + Intel), floor macOS 13 so the
-# translucent-blur fallback path reaches older Macs
-swiftc -O -target arm64-apple-macos13.0  main.swift -o "$BIN-arm64"
-swiftc -O -target x86_64-apple-macos13.0 main.swift -o "$BIN-x86_64"
+# compile - universal (Apple Silicon + Intel), floor macOS 11 so the
+# translucent-blur fallback path reaches older Macs (SF Symbols, the oldest
+# API the app leans on, arrived in 11 - Big Sur and Monterey Intel machines
+# run the download ZIP as-is)
+swiftc -O -target arm64-apple-macos11.0  main.swift -o "$BIN-arm64"
+swiftc -O -target x86_64-apple-macos11.0 main.swift -o "$BIN-x86_64"
 lipo -create -output "$BIN" "$BIN-arm64" "$BIN-x86_64"
 rm "$BIN-arm64" "$BIN-x86_64"
 
@@ -29,7 +31,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleShortVersionString</key><string>1.2</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleExecutable</key>      <string>Postit</string>
-    <key>LSMinimumSystemVersion</key>  <string>13.0</string>
+    <key>LSMinimumSystemVersion</key>  <string>11.0</string>
     <key>NSHighResolutionCapable</key> <true/>
     <key>LSUIElement</key>             <true/>
 </dict>
