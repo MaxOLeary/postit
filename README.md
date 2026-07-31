@@ -31,6 +31,12 @@ icon, no title bars, just a menu-bar icon and the notes themselves.
   it back out into its own note
 - **Hover to wake** - rest the pointer on an idle note and it takes focus with
   the cursor right where you left it, no clicking back in
+- **Math mode** - type `:math` on a line and the lines below become a live
+  calculator: arithmetic, percentages (`100 + 15%`), unit conversions
+  (`13lb kg`, `72f to c`), currency (`25 eur in usd`, daily rates), and
+  variables (`price = 40` ... `price + 8.5%`). Answers appear in green at the
+  end of each line; they're painted, not text, so notes stay clean. `:end`
+  turns it off. Lines that don't compute are just notes - never an error
 - Sentence auto-capitalization (hold Shift while typing the letter to keep it
   lowercase), style-normalized paste, per-note JSON storage
 
@@ -49,6 +55,7 @@ otherwise the ink you type with from the cursor on.
 | `WW` | back to default white |
 | `##` | insert a collapsible section at the cursor |
 | Shift+Up / Shift+Down | step the font size at the cursor |
+| `:math` on its own line | live calculator for the lines below (`:end` stops it) |
 
 Plus the standard menu shortcuts: Cmd+N new note, Cmd+W close note,
 Cmd+Z / Cmd+Shift+Z undo / redo, Cmd+X / C / V / A cut / copy / paste /

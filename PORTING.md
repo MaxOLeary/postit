@@ -38,6 +38,11 @@ These define the product. A port that changes any of them isn't Postit:
    bypasses, Shift+Up/Down font stepping at the cursor, ink follows the
    cursor color (Google-Docs style). Exact rules live in the
    `text delegate` section of `main.swift`.
+   Also `:math` mode: a line reading `:math` makes the lines below it a live
+   calculator (arithmetic, percentages, unit/currency conversion, variables;
+   `:end` stops it). Results paint in green after each line at draw time —
+   they are never inserted into the document, so the data format is
+   untouched. Rules live in the `Math engine` section of `main.swift`.
 5. **Conjoining.** Drag a note onto another's left/right edge, hold ~0.9s,
    the edge glows, release to merge into one window with side-by-side
    columns. Columns separate again by dragging the pill grip at a column's
@@ -118,6 +123,7 @@ port it as a unit. Highlights:
 | Focused tint | white `(0.85, alpha 0.12)` |
 | Selection highlight | translucent blue `rgba(0.36, 0.52, 0.92, 0.40)` |
 | Ink red / yellow / blue | `#D6382C` / `#F2E23A` / `#58B0EC` |
+| Math result annotation | mint `rgba(0.55, 0.87, 0.56, 0.95)`, gap = 0.9 × line font pt |
 | Default / min / max font | 15 / 10 / 40 pt, system UI font |
 | Min column width | 160 |
 | Column grip | 28×4 pill, top-right of each column |
