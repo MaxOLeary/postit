@@ -81,6 +81,10 @@ translucent blur panel.
 5. That's it - look for the note icon in the menu bar at the top of the
    screen (there's no Dock icon on purpose).
 
+The very first launch opens a welcome note: a short tour of the app with the
+whole shortcut list in it, written as a real note so you can try everything on
+the spot. Clear it out whenever you like - it's only seeded once.
+
 **From source** (needs the Xcode command line tools):
 
 ```bash
