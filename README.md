@@ -17,9 +17,9 @@ icon, no title bars, just a menu-bar icon and the notes themselves.
   restore their content, position, size, and font across launches
 - **Collapsible sections** - Obsidian-style folds with editable titles,
   inserted at the cursor from the toolbar chevron
-- **Ink swatches** - hover the ring in the toolbar and red/yellow/blue slide
+- **Ink swatches** - hover the ring in the toolbar and red/green/blue slide
   out; click one to color the selection and your typing from there on
-- **Double-tap shortcuts** - type `RR`, `YY`, or `BB` for ink, `WW` for white,
+- **Double-tap shortcuts** - type `RR`, `GG`, or `BB` for ink, `WW` for white,
   `##` for a new section; both characters vanish, replaced by the action
 - **Font stepping** - toolbar chevrons with a live size readout, or
   Shift+Up/Down right at the cursor
@@ -50,7 +50,7 @@ otherwise the ink you type with from the cursor on.
 | Shortcut | Action |
 | --- | --- |
 | `RR` | red ink |
-| `YY` | yellow ink |
+| `GG` | green ink |
 | `BB` | blue ink |
 | `WW` | back to default white |
 | `##` | insert a collapsible section at the cursor |
