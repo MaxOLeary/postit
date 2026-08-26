@@ -67,19 +67,23 @@ Runs on macOS 11 (Big Sur) or later, Apple Silicon and Intel. On macOS 26 the
 notes are real Liquid Glass; on older versions they fall back to a simpler
 translucent blur panel.
 
-**Easiest - no tools needed:**
+**[Download Postit](https://github.com/MaxOLeary/postit/releases/latest/download/Postit.zip)**
+- one ZIP, one app, always the newest build.
 
-1. Click the green **Code** button at the top of this page, then **Download ZIP**.
-2. Double-click the downloaded ZIP to unzip it.
-3. Inside the folder is **Postit** - drag it into your **Applications** folder.
-4. First launch only: macOS blocks apps it can't verify. Right-click (or
+1. Double-click the downloaded ZIP. Out pops **Postit**.
+2. Drag it into your **Applications** folder (or just double-click it right
+   there).
+3. First launch only: macOS blocks apps it can't verify. Right-click (or
    Control-click) **Postit** and choose **Open**, then click **Open** in the
    dialog. If your macOS version doesn't offer that, double-click Postit once,
    then allow it under **System Settings → Privacy & Security** (on Monterey
    and earlier: **System Preferences → Security & Privacy → General**) and
    click **Open Anyway**.
-5. That's it - look for the note icon in the menu bar at the top of the
+4. That's it - look for the note icon in the menu bar at the top of the
    screen (there's no Dock icon on purpose).
+
+The green **Code → Download ZIP** button works too; the same `Postit.app` is
+sitting at the top of the folder you get.
 
 The very first launch opens a welcome note: a short tour of the app with the
 whole shortcut list in it, written as a real note so you can try everything on
@@ -105,13 +109,9 @@ defaults write com.maxoleary.postit MDMirrorFolder ~/wherever/notes
 
 ## Repo layout
 
-- `Swift/main.swift` - the entire app
+- `Postit.app` - the ready-to-run app (what the download gives you)
+- `Swift/main.swift` - the entire app, one file
 - `Swift/build.sh` - compile + install script
-- `PORTING.md` - platform-independent spec (look, behaviors, data format)
-  for rebuilding the app on Windows or Linux
-- `versions/` - one snapshot per milestone, the app's full history at a glance
-- `postit.py` - the earlier PySide6 prototype the Swift app grew out of
-  (`Postit.command` launches it; `requirements.txt` covers it)
 
 ## License
 
