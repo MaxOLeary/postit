@@ -93,6 +93,7 @@ the spot. Clear it out whenever you like - it's only seeded once.
 
 ```bash
 cd Swift && ./build.sh    # compiles main.swift and installs /Applications/Postit.app
+                          # (--ship also refreshes the committed Postit.app)
 open /Applications/Postit.app
 ```
 

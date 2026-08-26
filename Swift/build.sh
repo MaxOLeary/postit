@@ -66,8 +66,15 @@ rm -rf "/Applications/$APP"
 cp -R "$STAGE/$APP" "/Applications/$APP"
 echo "Installed to /Applications/$APP"
 
-# Refresh the ready-to-run copy at the repo root: it ships in the repo so
-# Code -> Download ZIP hands people a double-clickable app, no build step.
-rm -rf "../$APP"
-cp -R "$STAGE/$APP" "../$APP"
-echo "Refreshed ../$APP (the committed copy that ships in the download ZIP)"
+# `./build.sh --ship` also refreshes the ready-to-run copy at the repo root
+# (the one committed for Code -> Download ZIP) and re-zips it for the single
+# GitHub release. Off by default so building from a clone doesn't dirty git.
+if [ "${1:-}" = "--ship" ]; then
+    rm -rf "../$APP"
+    cp -R "$STAGE/$APP" "../$APP"
+    ditto -c -k --keepParent --norsrc --noextattr "$STAGE/$APP" "$STAGE/Postit.zip"
+    echo "Refreshed ../$APP. Publish with:"
+    echo "  git add ../$APP && git commit && git push"
+    echo "  gh release upload latest \"$STAGE/Postit.zip\" -R MaxOLeary/postit --clobber"
+    trap - EXIT   # keep the zip around for that upload
+fi
