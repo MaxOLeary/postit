@@ -1526,6 +1526,64 @@ final class GrowingTextView: NSTextView {
             didChangeText()
         }
     }
+
+    // MARK: dragging a selection out
+
+    // AppKit only counts a dragged selection as a *move* when it lands back in
+    // the very text view it came from; a drop anywhere else copies. A note is
+    // built from one text view per block, so that made every drag between two
+    // blocks — or two notes — leave the original sitting where it was. The
+    // range a drag lifted is remembered here, and whichever block accepts the
+    // drop asks the source to take it out. A drop into another app still
+    // copies: losing a note's text because it was dragged into a browser field
+    // would be a nasty surprise.
+    private var draggedRange = NSRange(location: 0, length: 0)
+    private var draggedText = ""
+
+    /// A press inside the selection is what starts a text drag, and AppKit runs
+    /// the whole drag inside its own mouseDown — so the range is noted on the
+    /// way in, before the selection can move.
+    override func mouseDown(with event: NSEvent) {
+        rememberSelectionForDrag()
+        super.mouseDown(with: event)
+    }
+
+    /// Filling a pasteboard from the selection also happens at the top of a
+    /// drag. It's the copy path too, which is harmless: the range only ever
+    /// gets used by a drop that names this view as its source.
+    override func writeSelection(to pboard: NSPasteboard,
+                                 types: [NSPasteboard.PasteboardType]) -> Bool {
+        rememberSelectionForDrag()
+        return super.writeSelection(to: pboard, types: types)
+    }
+
+    private func rememberSelectionForDrag() {
+        let range = selectedRange()
+        guard range.length > 0, NSMaxRange(range) <= (string as NSString).length else { return }
+        draggedRange = range
+        draggedText = (string as NSString).substring(with: range)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let source = sender.draggingSource as? GrowingTextView
+        let ok = super.performDragOperation(sender)
+        if ok, let source, source !== self { source.removeDraggedSelection() }
+        return ok
+    }
+
+    /// Lift the text a drag carried away out of this block. Called by the block
+    /// that accepted the drop. A no-op if the text there has changed since the
+    /// drag started — then AppKit already handled the move itself.
+    func removeDraggedSelection() {
+        let range = draggedRange
+        draggedRange = NSRange(location: 0, length: 0)
+        guard range.length > 0, let ts = textStorage, NSMaxRange(range) <= ts.length,
+              (string as NSString).substring(with: range) == draggedText,
+              shouldChangeText(in: range, replacementString: "") else { return }
+        ts.deleteCharacters(in: range)
+        setSelectedRange(NSRange(location: range.location, length: 0))
+        didChangeText()
+    }
 }
 
 extension GrowingTextView: BlockView {
@@ -1581,6 +1639,15 @@ final class TitleFieldEditor: NSTextView {
         }
     }
 
+    /// Dropping body text into a fold's title moves it too, same as a drop
+    /// into another block.
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let source = sender.draggingSource as? GrowingTextView
+        let ok = super.performDragOperation(sender)
+        if ok, let source { source.removeDraggedSelection() }
+        return ok
+    }
+
     /// Whether the press landed on the selected glyphs themselves (a title is
     /// one line, so the selection is a single rectangle).
     private func hitsSelection(_ event: NSEvent) -> Bool {
@@ -1597,6 +1664,7 @@ final class TitleFieldEditor: NSTextView {
 final class SectionView: NSView, NSTextFieldDelegate {
     let body: GrowingTextView
     private var disclosure: NSButton!
+    private var deleteButton: NSButton!
     private let titleField = NSTextField()
     private var collapsed: Bool
     private var titleInkName: String?
@@ -1609,6 +1677,12 @@ final class SectionView: NSView, NSTextFieldDelegate {
     var title: String { titleField.stringValue }
     var isCollapsed: Bool { collapsed }
     var titleInk: String? { titleInkName }
+
+    /// Fired when a press on a collapsed fold turns into a drag: closed up, the
+    /// whole fold is one tile you can pick up anywhere. The controller runs the
+    /// move. An open fold is dragged by its title instead, since its body is
+    /// live text that still needs to take clicks.
+    var onDragOut: ((SectionView) -> Void)?
 
     // Title state before the in-flight keystroke (prev) and now (cur), fed by
     // field-editor selection notifications — which fire before the control's
@@ -1686,6 +1760,7 @@ final class SectionView: NSView, NSTextFieldDelegate {
         let del = chromeSymbolButton("xmark", point: 9, target: self, action: #selector(deleteTapped))
         del.toolTip = "Delete section"
         del.setContentHuggingPriority(.required, for: .horizontal)
+        deleteButton = del
 
         let header = NSStackView(views: [disclosure, titleField, del])
         header.orientation = .horizontal
@@ -1873,6 +1948,63 @@ final class SectionView: NSView, NSTextFieldDelegate {
     }
 
     /// Whether `field` is this section's header (for field-editor routing).
+    // MARK: dragging a collapsed fold
+
+    /// While it's collapsed the fold is one draggable tile, so presses land on
+    /// the section itself rather than falling through to the title field. The
+    /// chevron and the delete button keep their own hit areas.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        guard collapsed, onDragOut != nil, hit != nil,
+              hit !== disclosure, hit !== deleteButton else { return hit }
+        return self
+    }
+
+    /// A press on a collapsed fold. Travel past the drag threshold and the
+    /// whole fold comes with the cursor; let go without moving and the click
+    /// goes where it would have anyway — the caret into the title.
+    override func mouseDown(with event: NSEvent) {
+        guard collapsed, onDragOut != nil else {
+            super.mouseDown(with: event)
+            return
+        }
+        if event.clickCount > 1 {               // double-click still edits the title
+            placeCaretInTitle(at: event.locationInWindow)
+            titleField.currentEditor()?.selectWord(nil)
+            return
+        }
+        let start = event.locationInWindow
+        while let e = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp],
+                                      until: .distantFuture,
+                                      inMode: .eventTracking, dequeue: true) {
+            if e.type == .leftMouseUp {
+                placeCaretInTitle(at: e.locationInWindow)
+                return
+            }
+            let p = e.locationInWindow
+            if hypot(p.x - start.x, p.y - start.y) > Style.dragThreshold {
+                // Hand off on the next turn of the loop, for the same reason the
+                // title editor does: the move rearranges the view tree, and
+                // doing that inside our own mouseDown is asking for trouble.
+                let handoff = onDragOut
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    handoff?(self)
+                }
+                return
+            }
+        }
+    }
+
+    /// Put the caret in the title where the click landed — a collapsed fold
+    /// swallows its own clicks so it can be dragged, so it passes them on.
+    private func placeCaretInTitle(at windowPoint: NSPoint) {
+        window?.makeFirstResponder(titleField)
+        guard let ed = titleField.currentEditor() as? NSTextView else { return }
+        let p = ed.convert(windowPoint, from: nil)
+        ed.setSelectedRange(NSRange(location: ed.characterIndexForInsertion(at: p), length: 0))
+    }
+
     func ownsTitleField(_ field: NSTextField) -> Bool { field === titleField }
 
     /// Move keyboard focus into the title field (after inserting a new section).
@@ -1942,6 +2074,9 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     private var titleEditor: TitleFieldEditor?
     // The line showing where a dragged section will land; alive only mid-drag.
     private weak var dropMarker: NSView?
+    // Where a fold dragged in from *another* note would land. Set while that
+    // drag hovers this note, consumed when it's dropped.
+    private var pendingDrop: SectionDrop?
     // The text view the user is currently editing — font changes target it.
     private weak var activeText: NSTextView?
     // Set while the cursor lives in a section title instead — the font
@@ -2276,7 +2411,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     }
 
     private func makeSectionView(from block: Block) -> SectionView {
-        SectionView(block: block, fontSize: fontSize, textDelegate: self,
+        let section = SectionView(block: block, fontSize: fontSize, textDelegate: self,
                     onChange: { [weak self] in self?.saveDebounced() },
                     onDelete: { [weak self] section in self?.removeSection(section) },
                     onTitleFontStep: { [weak self] section, delta in
@@ -2288,6 +2423,8 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
                     onTitleReturn: { [weak self] section in
                         self?.exitTitle(below: section)
                     })
+        section.onDragOut = { [weak self] s in self?.dragSection(s) }
+        return section
     }
 
     // MARK: columns & dividers
@@ -2458,28 +2595,29 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         columns.map { blockViews(in: $0).map { $0.asBlock() } }
     }
 
-    /// Take on another note's columns (a dock-merge): insert them on `side`,
-    /// grow the window to `frame`, and hand focus to the first arrival.
-    func adoptColumns(_ cols: [[Block]], on side: DockSide, frame: NSRect) {
-        let oldWidths = columns.map { $0.view.frame.width }
+    /// The pixel width of each column right now — what the arrivals of a merge
+    /// are measured against so the combined note keeps their proportions.
+    func columnWidths() -> [CGFloat] { columns.map { $0.view.frame.width } }
+
+    /// Take on another note's columns (a dock-merge): insert them on `side` and
+    /// re-share the width this window already has. The merged note stays the
+    /// size it was — dropping one note onto another shouldn't stretch a window
+    /// across the screen — so the columns just get proportionally narrower.
+    func adoptColumns(_ cols: [[Block]], on side: DockSide, arriving: [CGFloat]) {
+        let oldWidths = columnWidths()
         let fresh = cols.map { makeColumn(blocks: $0) }
         for (i, col) in fresh.enumerated() {
             insertColumn(col, at: side == .left ? i : columns.count)
         }
-        window.setFrame(frame, display: true)
-        // Existing columns keep the pixel widths they had; the arrivals split
-        // the width the window just gained.
-        let n = columns.count
-        let gutter = Style.padding * 2 + 1
-        let avail = columnsHost.bounds.width - gutter * CGFloat(n - 1)
-        if avail > 0 {
-            let share = max((avail - oldWidths.reduce(0, +)) / CGFloat(fresh.count),
-                            Style.minColumnWidth)
-            let newWs = Array(repeating: share, count: fresh.count)
-            let ordered = side == .left ? newWs + oldWidths : oldWidths + newWs
-            let sum = ordered.reduce(0, +)
-            colWeights = ordered.map { $0 / sum }
-        }
+        // Weights follow what each column was before the merge, so a wide note
+        // that swallows a narrow one still reads as wide-plus-narrow.
+        let newWs = arriving.count == fresh.count
+            ? arriving
+            : Array(repeating: oldWidths.first ?? Style.minColumnWidth, count: fresh.count)
+        let ordered = side == .left ? newWs + oldWidths : oldWidths + newWs
+        let sum = ordered.reduce(0, +)
+        if sum > 0 { colWeights = ordered.map { $0 / sum } }
+        growToFitColumns()
         layoutColumns()
         showDockGlow(nil)
         if let tv = fresh.first.flatMap({ blockViews(in: $0).first?.primaryTextView }) {
@@ -2487,6 +2625,20 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             activeText = tv
         }
         saveDebounced()
+    }
+
+    /// Widen the window only if the columns it now holds can't fit at their
+    /// minimum width — the one case where a merge is allowed to change the
+    /// size, since the alternative is columns too narrow to read.
+    private func growToFitColumns() {
+        let n = columns.count
+        let gutter = Style.padding * 2 + 1
+        let need = CGFloat(n) * Style.minColumnWidth
+            + gutter * CGFloat(n - 1) + Style.padding * 2
+        guard window.frame.width < need else { return }
+        var f = window.frame
+        f.size.width = need
+        window.setFrame(f, display: true)
     }
 
     /// Show (or clear, with nil) the edge glow that marks where a dragged note
@@ -2758,23 +2910,25 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         let markerY: CGFloat
     }
 
-    /// The section-move gesture, handed over by the title's field editor when a
-    /// press inside a selected title turns into a drag: the section dims in
-    /// place, a snapshot of it follows the cursor, and a line shows where it
-    /// will land until the button lifts. Escape cancels and leaves it put.
+    /// The fold-move gesture, started either by a drag off a selected title or
+    /// by grabbing a collapsed fold anywhere. The fold dims in place, a
+    /// snapshot of it follows the cursor — in its own little window, so it can
+    /// be carried onto a different note — and a line shows where it will land
+    /// until the button lifts. Escape cancels and leaves it put.
     private func dragSection(_ section: SectionView) {
-        NSLog("DBG dragSection enter")
-        guard column(containing: section) != nil else { NSLog("DBG no column"); return }
+        guard column(containing: section) != nil else { return }
         window.makeFirstResponder(nil)          // commit the title edit first
 
-        let start = container.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation),
-                                      from: nil)
-        let origin = container.convert(section.bounds, from: section).origin
-        let grab = NSPoint(x: start.x - origin.x, y: start.y - origin.y)
-        let ghost = makeGhost(for: section)
+        // Everything is tracked in screen coordinates: the drag can leave this
+        // window entirely, so this window's coordinate space isn't enough.
+        let startScreen = NSEvent.mouseLocation
+        let onScreen = window.convertToScreen(section.convert(section.bounds, to: nil))
+        let grab = NSPoint(x: startScreen.x - onScreen.minX, y: startScreen.y - onScreen.minY)
+        let ghost = makeGhostWindow(for: section)
         section.alphaValue = Style.dragSourceAlpha
 
-        var drop: SectionDrop?
+        var drop: SectionDrop?                  // where it lands in this note…
+        var foreign: NoteController?            // …or the other note it's over
         var cancelled = false
         var dragging = true
         while dragging {
@@ -2788,48 +2942,121 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             }
             // Poll the pointer rather than read it off the event, so a mouse
             // held still at a column's edge keeps auto-scrolling.
-            let p = window.convertPoint(fromScreen: NSEvent.mouseLocation)
-            let inContainer = container.convert(p, from: nil)
-            ghost?.setFrameOrigin(NSPoint(x: inContainer.x - grab.x, y: inContainer.y - grab.y))
-            drop = dropTarget(for: section, at: p)
-            if let drop { autoScroll(drop.column, at: p) }
-            showDropMarker(drop)
+            let screen = NSEvent.mouseLocation
+            ghost?.setFrameOrigin(NSPoint(x: screen.x - grab.x, y: screen.y - grab.y))
+            let over = manager?.note(at: screen)
+            if let over, over !== self {
+                // Over another note: that note draws the marker, ours clears.
+                if foreign !== over { foreign?.clearDropPreview() }
+                showDropMarker(nil)
+                drop = nil
+                foreign = over.previewDrop(at: screen) ? over : nil
+            } else {
+                foreign?.clearDropPreview()
+                foreign = nil
+                let p = window.convertPoint(fromScreen: screen)
+                drop = dropTarget(excluding: section, at: p)
+                if let drop { autoScroll(drop.column, at: p) }
+                showDropMarker(drop)
+            }
         }
 
-        NSLog("DBG loop done cancelled=%d drop=%@", cancelled ? 1 : 0,
-              drop.map { "idx \($0.index) split \($0.split != nil)" } ?? "nil")
-        ghost?.removeFromSuperview()
+        ghost?.orderOut(nil)
         showDropMarker(nil)
         section.alphaValue = 1
-        if !cancelled, let drop { move(section, to: drop) }
-        NSLog("DBG moved")
-        section.focusTitle()
-        NSLog("DBG focused title")
+        if cancelled {
+            foreign?.clearDropPreview()
+        } else if let foreign {
+            handOff(section, to: foreign)
+        } else if let drop {
+            move(section, to: drop)
+        }
+        foreign?.clearDropPreview()
+        if section.window != nil { section.focusTitle() }
     }
 
-    /// The snapshot of the section that floats under the cursor mid-drag.
-    private func makeGhost(for section: SectionView) -> NSView? {
+    /// Hand a fold over to another note: it comes out of this one and is
+    /// rebuilt there at the spot that note is previewing. Each note keeps its
+    /// own undo step, since each has its own window and its own undo stack.
+    private func handOff(_ section: SectionView, to other: NoteController) {
+        guard let from = column(containing: section) else { return }
+        let block = section.asBlock()
+        let before = snapshotColumns()
+        if let at = activeText, section.owns(at) { activeText = nil }
+        if activeTitleSection === section { activeTitleSection = nil }
+        detachBlockView(section, from: from)
+        ensureNonEmpty(from)
+        window.undoManager?.registerUndo(withTarget: self) { me in me.restoreBlocks(before) }
+        window.undoManager?.setActionName("Move Section")
+        saveDebounced()
+        other.acceptDroppedSection(block)
+    }
+
+    /// A fold from another note is hovering over this one: show where it would
+    /// land, and remember that spot for the drop. False means nowhere sensible.
+    private func previewDrop(at screenPoint: NSPoint) -> Bool {
+        let p = window.convertPoint(fromScreen: screenPoint)
+        guard let drop = dropTarget(excluding: nil, at: p) else {
+            clearDropPreview()
+            return false
+        }
+        autoScroll(drop.column, at: p)
+        showDropMarker(drop)
+        pendingDrop = drop
+        return true
+    }
+
+    private func clearDropPreview() {
+        showDropMarker(nil)
+        pendingDrop = nil
+    }
+
+    /// Take in a fold dragged over from another note, at the previewed spot.
+    private func acceptDroppedSection(_ block: Block) {
+        guard let drop = pendingDrop else { return }
+        clearDropPreview()
+        let before = snapshotColumns()
+        let section = makeSectionView(from: block)
+        land(section, at: drop)
+        window.undoManager?.registerUndo(withTarget: self) { me in me.restoreBlocks(before) }
+        window.undoManager?.setActionName("Move Section")
+        saveDebounced()
+        focus()
+        section.focusTitle()
+    }
+
+    /// The snapshot of the fold that floats under the cursor mid-drag. It's its
+    /// own borderless window rather than a subview, so the fold can be carried
+    /// clear of this note and dropped on another one.
+    private func makeGhostWindow(for section: SectionView) -> NSWindow? {
         let bounds = section.bounds
         guard bounds.width > 1, bounds.height > 1,
               let rep = section.bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
         section.cacheDisplay(in: bounds, to: rep)
         let image = NSImage(size: bounds.size)
         image.addRepresentation(rep)
-        let view = NSImageView(frame: container.convert(bounds, from: section))
-        view.image = image
-        view.wantsLayer = true
-        view.alphaValue = Style.dragGhostAlpha
-        let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.45)
-        shadow.shadowBlurRadius = 12
-        shadow.shadowOffset = .zero
-        view.shadow = shadow
-        container.addSubview(view)
-        return view
+        let w = NSWindow(contentRect: window.convertToScreen(section.convert(bounds, to: nil)),
+                         styleMask: .borderless, backing: .buffered, defer: false)
+        w.isOpaque = false
+        w.backgroundColor = .clear
+        w.ignoresMouseEvents = true
+        w.level = .floating
+        w.alphaValue = Style.dragGhostAlpha
+        w.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle]
+        w.hasShadow = true
+        let iv = NSImageView(frame: NSRect(origin: .zero, size: bounds.size))
+        iv.image = image
+        w.contentView = iv
+        w.orderFront(nil)
+        return w
     }
 
-    /// The landing spot for `section` given a pointer in window coordinates.
-    private func dropTarget(for section: SectionView, at windowPoint: NSPoint) -> SectionDrop? {
+
+    /// The landing spot for a dragged fold given a pointer in window
+    /// coordinates. `section` is the fold being moved when it started in this
+    /// note (it doesn't count toward the indices, since it's about to be lifted
+    /// out) and nil when it's arriving from another note.
+    private func dropTarget(excluding section: SectionView?, at windowPoint: NSPoint) -> SectionDrop? {
         guard let col = dropColumn(at: windowPoint) else { return nil }
         let stack = col.stack
         let p = stack.convert(windowPoint, from: nil)
@@ -2949,7 +3176,18 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         guard let from = column(containing: section) else { return }
         let before = snapshotColumns()
         detachBlockView(section, from: from)
+        land(section, at: drop)
+        ensureNonEmpty(from)
+        window.undoManager?.registerUndo(withTarget: self) { me in me.restoreBlocks(before) }
+        window.undoManager?.setActionName("Move Section")
+        saveDebounced()
+    }
 
+    /// Put an already-built fold down at `drop`: splitting a paragraph in two
+    /// when the drop landed mid-text (the tail moves below the fold), and
+    /// giving it somewhere to type when it lands at the very bottom. Shared by
+    /// a move inside one note and a hand-off between two.
+    private func land(_ section: SectionView, at drop: SectionDrop) {
         let target = drop.column
         var index = min(drop.index, target.stack.arrangedSubviews.count)
         if let split = drop.split, let ts = split.tv.textStorage {
@@ -2968,16 +3206,11 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             index = min(index, target.stack.arrangedSubviews.count)
         }
         insertBlockView(section, at: index, in: target)
-        ensureNonEmpty(from)
         // A fold left sitting at the very bottom leaves nowhere to type — give
         // it the same trailing text block a freshly inserted section gets.
         if target.stack.arrangedSubviews.last === section {
             appendBlockView(makeTextView(from: Block(kind: .text)), in: target)
         }
-        NSLog("DBG move done: %d blocks", target.stack.arrangedSubviews.count)
-        window.undoManager?.registerUndo(withTarget: self) { me in me.restoreBlocks(before) }
-        window.undoManager?.setActionName("Move Section")
-        saveDebounced()
     }
 
     /// Pull a block view out of its column, dropping the width constraint that
@@ -3621,6 +3854,14 @@ final class NotesManager: NSObject, NSMenuDelegate {
         }
     }
 
+    /// The frontmost visible note whose window is under `screenPoint` — how a
+    /// fold dragged out of one note finds the note it's being carried onto.
+    func note(at screenPoint: NSPoint) -> NoteController? {
+        controllers
+            .sorted { $0.windowRef.orderedIndex < $1.windowRef.orderedIndex }
+            .first { $0.windowRef.isVisible && $0.windowRef.frame.contains(screenPoint) }
+    }
+
     // MARK: drag-to-dock (conjoining notes)
 
     /// A note window moved. If the user is mid-drag, start watching the mouse
@@ -3698,19 +3939,16 @@ final class NotesManager: NSObject, NSMenuDelegate {
         commitMerge(dragged: dragged, into: c.target, side: c.side)
     }
 
-    /// Conjoin: the dragged note's columns join `target` on `side`, the window
-    /// grows to fit both, and the dragged note (window + file) is absorbed.
+    /// Conjoin: the dragged note's columns join `target` on `side` and the
+    /// dragged note (window + file) is absorbed. The combined note keeps the
+    /// target's own frame — same width, same height, same spot — and the
+    /// arriving columns share out the width that's already there.
     private func commitMerge(dragged: NoteController, into target: NoteController, side: DockSide) {
         let cols = dragged.snapshotColumns()
-        let t = target.windowRef.frame
-        let d = dragged.windowRef.frame
-        let w = t.width + d.width
-        let h = max(t.height, d.height)
-        let x = side == .right ? t.minX : t.maxX - w
+        let widths = dragged.columnWidths()
         dragged.discard()                       // close without saving
         NoteStore(id: dragged.id).delete()      // its content lives in target now
-        target.adoptColumns(cols, on: side,
-                            frame: NSRect(x: x, y: t.maxY - h, width: w, height: h))
+        target.adoptColumns(cols, on: side, arriving: widths)
         target.focus()
     }
 
