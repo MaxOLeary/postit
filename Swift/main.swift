@@ -3973,12 +3973,36 @@ final class NotesManager: NSObject, NSMenuDelegate {
 
     // MARK: menu-bar switcher
 
+    /// Status-item glyph: the app icon boiled down to one line - a rounded
+    /// square outline with a plus in the center. Template image, so it takes
+    /// the menu bar's tint like the system icons.
+    private static func menuBarGlyph() -> NSImage {
+        let size = NSSize(width: 18, height: 18)
+        let img = NSImage(size: size, flipped: false) { _ in
+            let i: CGFloat = 2.0
+            let box = NSRect(x: i, y: i, width: size.width - i * 2, height: size.height - i * 2)
+            let outline = NSBezierPath(roundedRect: box, xRadius: 3.2, yRadius: 3.2)
+            outline.lineWidth = 1.4
+            NSColor.black.setStroke()
+            outline.stroke()
+            let cx = size.width / 2, cy = size.height / 2, arm: CGFloat = 2.8
+            let plus = NSBezierPath()
+            plus.move(to: NSPoint(x: cx - arm, y: cy)); plus.line(to: NSPoint(x: cx + arm, y: cy))
+            plus.move(to: NSPoint(x: cx, y: cy - arm)); plus.line(to: NSPoint(x: cx, y: cy + arm))
+            plus.lineWidth = 1.4
+            plus.lineCapStyle = .round
+            plus.stroke()
+            return true
+        }
+        img.isTemplate = true
+        img.accessibilityDescription = "Postit"
+        return img
+    }
+
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            button.image = NSImage(systemSymbolName: "note.text",
-                                   accessibilityDescription: "Postit")
-            button.image?.isTemplate = true
+            button.image = Self.menuBarGlyph()
             button.toolTip = "Postit notes"
         }
         let menu = NSMenu()
