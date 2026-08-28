@@ -3758,6 +3758,10 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        // A focused note rides above every other app's windows; losing focus
+        // drops it back into the normal stack so it never squats on top of
+        // whatever you clicked over to.
+        window.level = .floating
         applyTint(focused: true)
         restoreCursor()
     }
@@ -3782,6 +3786,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        window.level = .normal
         applyTint(focused: false)
         store.saveNow(snapshot())
     }

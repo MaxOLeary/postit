@@ -7,7 +7,8 @@ APP="Postit.app"
 BIN="$APP/Contents/MacOS/Postit"
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp icon/Postit.icns "$APP/Contents/Resources/Postit.icns"   # regenerate with icon/make-icns.sh
 
 # compile - universal (Apple Silicon + Intel), floor macOS 11 so the
 # translucent-blur fallback path reaches older Macs (SF Symbols, the oldest
@@ -31,6 +32,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleShortVersionString</key><string>1.2</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleExecutable</key>      <string>Postit</string>
+    <key>CFBundleIconFile</key>       <string>Postit</string>
     <key>LSMinimumSystemVersion</key>  <string>11.0</string>
     <key>NSHighResolutionCapable</key> <true/>
     <key>LSUIElement</key>             <true/>
