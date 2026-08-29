@@ -91,14 +91,19 @@ private enum Style {
     // Note drawer: a thin bar tucked into the left padding at half height;
     // click it and a note-card listing every saved note slides in from the
     // left edge, pushing the body text right. Fixed order, drag rows to move.
-    static let drawerWidth:    CGFloat = 124
+    static let drawerWidth:    CGFloat = 140     // default; drag the handle to resize
+    static let drawerMinWidth: CGFloat = 100
     static let drawerGap:      CGFloat = 10      // between the drawer and the body
     static let drawerInsetTop: CGFloat = 8       // below the toolbar strip
-    static let drawerInsetBot: CGFloat = 10
+    static let drawerInsetBot: CGFloat = cornerRadius + 2   // clear of the corner curve
     static let drawerRadius:   CGFloat = 18
-    static let drawerRowH:     CGFloat = 26
-    static let drawerFill      = NSColor(calibratedRed: 0.13, green: 0.17, blue: 0.19, alpha: 0.90)
-    static let drawerHover     = NSColor(calibratedWhite: 1.0, alpha: 0.08)
+    static let drawerTabH:     CGFloat = 80
+    static let drawerRowH:     CGFloat = 34
+    static let drawerRowGap:   CGFloat = 6
+    static let drawerTint      = NSColor(calibratedWhite: 0.85, alpha: 0.10)
+    static let drawerCard      = NSColor(calibratedWhite: 1.0, alpha: 0.07)
+    static let drawerCardEdge  = NSColor(calibratedWhite: 1.0, alpha: 0.10)
+    static let drawerHover     = NSColor(calibratedWhite: 1.0, alpha: 0.14)
     static let idleTint       = NSColor(calibratedWhite: 0.16, alpha: 0.18)
     static let focusedTint    = NSColor(calibratedWhite: 0.85, alpha: 0.12)
     // Ink swatches — red, green, blue, the green matching the color :math
@@ -2111,7 +2116,13 @@ extension SectionView: BlockView {
 /// click never turns into a window drag.
 private final class DrawerTab: NSView {
     var onTap: (() -> Void)?
+    var onDrag: ((CGFloat) -> Void)?           // horizontal delta in window points
+    var onDragEnd: (() -> Void)?
+    var drawsBar = true
     private var hot = false { didSet { needsDisplay = true } }
+    private var downAt: NSPoint?
+    private var lastX: CGFloat = 0
+    private var dragging = false
 
     override var mouseDownCanMoveWindow: Bool { false }
 
@@ -2124,14 +2135,33 @@ private final class DrawerTab: NSView {
     }
     override func mouseEntered(with event: NSEvent) { hot = true }
     override func mouseExited(with event: NSEvent)  { hot = false }
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
-    override func mouseDown(with event: NSEvent) {}
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: drawsBar ? .pointingHand : .resizeLeftRight)
+    }
+    override func mouseDown(with event: NSEvent) {
+        downAt = event.locationInWindow
+        lastX = downAt!.x
+        dragging = false
+    }
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = downAt, onDrag != nil else { return }
+        let p = event.locationInWindow
+        if !dragging, abs(p.x - start.x) > Style.dragThreshold { dragging = true }
+        guard dragging else { return }
+        onDrag?(p.x - lastX)
+        lastX = p.x
+    }
     override func mouseUp(with event: NSEvent) {
+        let was = dragging
+        downAt = nil
+        dragging = false
+        if was { onDragEnd?(); return }
         if bounds.contains(convert(event.locationInWindow, from: nil)) { onTap?() }
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let w: CGFloat = 2, h: CGFloat = 16
+        guard drawsBar else { return }
+        let w: CGFloat = 2, h: CGFloat = bounds.height * 0.4
         let bar = NSRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
         (hot ? Style.textColor : Style.chromeColor).setFill()
         NSBezierPath(roundedRect: bar, xRadius: 1, yRadius: 1).fill()
@@ -2145,6 +2175,7 @@ private final class DrawerRow: NSView {
     let noteID: String
     var isCurrent = false { didSet { needsDisplay = true } }
     var onOpen: (() -> Void)?
+    var onDelete: (() -> Void)?
     var onDragBegan: (() -> Void)?
     var onDragMoved: ((NSPoint) -> Void)?       // window coordinates
     var onDragEnded: ((Bool) -> Void)?          // true if a drag actually happened
@@ -2157,10 +2188,10 @@ private final class DrawerRow: NSView {
         noteID = id
         super.init(frame: NSRect(x: 0, y: 0, width: Style.drawerWidth, height: Style.drawerRowH))
         label.stringValue = title.isEmpty ? "Untitled" : title
-        label.font = NSFont.systemFont(ofSize: 12)
+        label.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
         label.textColor = title.isEmpty ? Style.chromeColor : Style.textColor
         label.lineBreakMode = .byTruncatingTail
-        label.frame = NSRect(x: 14, y: (Style.drawerRowH - 16) / 2, width: Style.drawerWidth - 24, height: 16)
+        label.frame = NSRect(x: 20, y: (Style.drawerRowH - 17) / 2, width: Style.drawerWidth - 36, height: 17)
         label.autoresizingMask = [.width]
         addSubview(label)
     }
@@ -2178,11 +2209,26 @@ private final class DrawerRow: NSView {
     override func mouseEntered(with event: NSEvent) { hovered = true }
     override func mouseExited(with event: NSEvent)  { hovered = false }
 
+    /// Each row is its own little card - fill + hairline edge - so the list
+    /// reads as a stack of notes, not lines of text. Current = selection blue.
     override func draw(_ dirtyRect: NSRect) {
-        guard isCurrent || hovered else { return }
-        (isCurrent ? Style.selectionColor : Style.drawerHover).setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 1), xRadius: 6, yRadius: 6).fill()
+        let card = NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0.5), xRadius: 9, yRadius: 9)
+        (isCurrent ? Style.selectionColor : hovered ? Style.drawerHover : Style.drawerCard).setFill()
+        card.fill()
+        Style.drawerCardEdge.setStroke()
+        card.lineWidth = 1
+        card.stroke()
     }
+
+    override func rightMouseDown(with event: NSEvent) {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Open", action: #selector(openFromMenu), keyEquivalent: "").target = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Delete Note…", action: #selector(deleteFromMenu), keyEquivalent: "").target = self
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+    @objc private func openFromMenu() { onOpen?() }
+    @objc private func deleteFromMenu() { onDelete?() }
 
     override func mouseDown(with event: NSEvent) {
         downAt = event.locationInWindow
@@ -2214,8 +2260,12 @@ private final class DrawerRow: NSView {
 /// happens here: a dragged row's landing slot is shown with a thin blue line.
 private final class NoteDrawer: NSView {
     var onOpen: ((String) -> Void)?
+    var onDelete: ((String, String) -> Void)?
     var onNew: (() -> Void)?
     var onReorder: (([String]) -> Void)?
+    var onResize: ((CGFloat) -> Void)?         // horizontal delta
+    var onResizeEnd: (() -> Void)?
+    private let clip = NSView()
     private let scroll = NSScrollView()
     private let stack = FlippedStack()
     private var rows: [DrawerRow] = []
@@ -2226,30 +2276,62 @@ private final class NoteDrawer: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
+        // Outer view carries the shadow; `clip` rounds only the right corners
+        // (the left edge is glued to the note). The glass inside is widened
+        // past the left edge so its own rounded left corners get clipped off.
         wantsLayer = true
-        layer?.backgroundColor = Style.drawerFill.cgColor
-        layer?.cornerRadius = Style.drawerRadius
-        layer?.maskedCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.12).cgColor
         layer?.shadowColor = NSColor.black.cgColor
-        layer?.shadowOpacity = 0.45
-        layer?.shadowRadius = 14
-        layer?.shadowOffset = CGSize(width: 0, height: -6)
+        layer?.shadowOpacity = 0.35
+        layer?.shadowRadius = 12
+        layer?.shadowOffset = CGSize(width: 0, height: -4)
         layer?.masksToBounds = false
+
+        clip.frame = bounds
+        clip.autoresizingMask = [.width, .height]
+        clip.wantsLayer = true
+        clip.layer?.cornerRadius = Style.drawerRadius
+        clip.layer?.cornerCurve = .continuous
+        clip.layer?.maskedCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
+        clip.layer?.masksToBounds = true
+        clip.layer?.borderWidth = 1
+        clip.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.14).cgColor
+        addSubview(clip)
+
+        let r = Style.drawerRadius
+        let glassRect = NSRect(x: -r, y: 0, width: bounds.width + r, height: bounds.height)
+        let backing: NSView
+        if #available(macOS 26.0, *) {
+            let g = NSGlassEffectView(frame: glassRect)
+            g.cornerRadius = r
+            g.tintColor = Style.drawerTint
+            backing = g
+        } else {
+            let v = NSVisualEffectView(frame: glassRect)
+            v.material = .hudWindow
+            v.blendingMode = .behindWindow
+            v.state = .active
+            let tint = NSView(frame: v.bounds)
+            tint.autoresizingMask = [.width, .height]
+            tint.wantsLayer = true
+            tint.layer?.backgroundColor = Style.drawerTint.cgColor
+            v.addSubview(tint)
+            backing = v
+        }
+        backing.autoresizingMask = [.width, .height]
+        clip.addSubview(backing)
 
         let header = NSTextField(labelWithString: "NOTES")
         header.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
         header.textColor = Style.chromeColor
         header.frame = NSRect(x: 14, y: frame.height - 24, width: 60, height: 14)
         header.autoresizingMask = [.minYMargin]
-        addSubview(header)
+        clip.addSubview(header)
 
         let plus = chromeSymbolButton("plus", point: 10, target: self, action: #selector(newTapped))
         plus.frame = NSRect(x: frame.width - 28, y: frame.height - 26, width: 18, height: 18)
         plus.autoresizingMask = [.minYMargin, .minXMargin]
         plus.toolTip = "New note"
-        addSubview(plus)
+        clip.addSubview(plus)
 
         scroll.frame = NSRect(x: 0, y: 8, width: frame.width, height: frame.height - 38)
         scroll.autoresizingMask = [.width, .height]
@@ -2261,11 +2343,20 @@ private final class NoteDrawer: NSView {
         scroll.verticalScrollElasticity = .allowed
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 0
+        stack.spacing = Style.drawerRowGap
+        stack.edgeInsets = NSEdgeInsets(top: 2, left: 0, bottom: 8, right: 0)
         stack.translatesAutoresizingMaskIntoConstraints = false
         scroll.documentView = stack
         stack.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor).isActive = true
-        addSubview(scroll)
+        clip.addSubview(scroll)
+
+        // Resize grip: the drawer's right edge, drag to widen or narrow.
+        let edge = DrawerTab(frame: NSRect(x: frame.width - 6, y: 0, width: 6, height: frame.height))
+        edge.autoresizingMask = [.minXMargin, .height]
+        edge.drawsBar = false
+        edge.onDrag = { [weak self] dx in self?.onResize?(dx) }
+        edge.onDragEnd = { [weak self] in self?.onResizeEnd?() }
+        addSubview(edge)
     }
     required init?(coder: NSCoder) { fatalError("unused") }
 
@@ -2280,6 +2371,7 @@ private final class NoteDrawer: NSView {
             r.translatesAutoresizingMaskIntoConstraints = false
             r.heightAnchor.constraint(equalToConstant: Style.drawerRowH).isActive = true
             r.onOpen = { [weak self] in self?.onOpen?(e.id) }
+            r.onDelete = { [weak self] in self?.onDelete?(e.id, e.title) }
             r.onDragBegan = { [weak self] in self?.dropIndex = nil }
             r.onDragMoved = { [weak self, weak r] p in
                 guard let self, let r else { return }
@@ -2302,7 +2394,8 @@ private final class NoteDrawer: NSView {
         var idx = rows.filter { $0.frame.midY < p.y }.count
         idx = max(0, min(rows.count, idx))
         dropIndex = idx
-        let y = idx < rows.count ? rows[idx].frame.minY : (rows.last?.frame.maxY ?? 0)
+        let y = idx < rows.count ? rows[idx].frame.minY - Style.drawerRowGap / 2
+                                 : (rows.last?.frame.maxY ?? 0) + Style.drawerRowGap / 2
         if marker == nil {
             let m = NSView()
             m.wantsLayer = true
@@ -2357,6 +2450,11 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     private var drawerTab: DrawerTab!
     private var drawerOpen = false
     private var drawerEscMonitor: Any?
+    private static let drawerWidthKey = "DrawerWidth"
+    private var drawerWidth: CGFloat = {
+        let w = CGFloat(UserDefaults.standard.double(forKey: "DrawerWidth"))
+        return w >= Style.drawerMinWidth ? w : Style.drawerWidth
+    }()
     private var columns: [NoteColumn] = []
     private var dividers: [ColumnDivider] = []
     // Per-column width fractions (parallel to `columns`, sums to 1). Equal by
@@ -2482,10 +2580,12 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
                                          width: container.bounds.width, height: Style.stripHeight))
         strip.autoresizingMask = [.width, .minYMargin]
 
-        // "+" new note, top-left
+        // "+" new note, top-right beside the close button (the drawer's
+        // handle on the left edge is the note list now)
         let plus = chromeButton("+", size: 20, fontSize: 18)
-        plus.frame = NSRect(x: 8, y: (Style.stripHeight - 20) / 2, width: 20, height: 20)
-        plus.autoresizingMask = [.maxXMargin, .minYMargin]
+        plus.frame = NSRect(x: strip.bounds.width - 52, y: (Style.stripHeight - 20) / 2,
+                            width: 20, height: 20)
+        plus.autoresizingMask = [.minXMargin, .minYMargin]
         plus.target = self
         plus.action = #selector(newNote)
         plus.toolTip = "New note"
@@ -2493,20 +2593,20 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
         // font size: two bare chevrons (no bezel), up = bigger, down = smaller
         let up = symbolButton("chevron.up", point: 9, action: #selector(fontUp))
-        up.frame = NSRect(x: 33, y: Style.stripHeight / 2 - 1, width: 15, height: 11)
+        up.frame = NSRect(x: 8, y: Style.stripHeight / 2 - 1, width: 15, height: 11)
         up.autoresizingMask = [.maxXMargin, .minYMargin]
         up.toolTip = "Bigger"
         strip.addSubview(up)
 
         let down = symbolButton("chevron.down", point: 9, action: #selector(fontDown))
-        down.frame = NSRect(x: 33, y: Style.stripHeight / 2 - 10, width: 15, height: 11)
+        down.frame = NSRect(x: 8, y: Style.stripHeight / 2 - 10, width: 15, height: 11)
         down.autoresizingMask = [.maxXMargin, .minYMargin]
         down.toolTip = "Smaller"
         strip.addSubview(down)
 
         // size readout — snug against the chevrons so the stepper reads as one control
         sizeLabel = NSTextField(labelWithString: "\(Style.sizeRank(fontSize))")
-        sizeLabel.frame = NSRect(x: 44, y: (Style.stripHeight - 16) / 2, width: 26, height: 16)
+        sizeLabel.frame = NSRect(x: 19, y: (Style.stripHeight - 16) / 2, width: 26, height: 16)
         sizeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         sizeLabel.textColor = Style.chromeColor
         sizeLabel.autoresizingMask = [.maxXMargin, .minYMargin]
@@ -2517,7 +2617,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         // cursor and drops a collapsible section (title + foldable body) there.
         let sectionBtn = symbolButton("chevron.right", point: 12,
                                       action: #selector(insertSection as () -> Void))
-        sectionBtn.frame = NSRect(x: 65, y: (Style.stripHeight - 16) / 2, width: 16, height: 16)
+        sectionBtn.frame = NSRect(x: 40, y: (Style.stripHeight - 16) / 2, width: 16, height: 16)
         sectionBtn.autoresizingMask = [.maxXMargin, .minYMargin]
         sectionBtn.toolTip = "Add a collapsible section at the cursor"
         strip.addSubview(sectionBtn)
@@ -2527,7 +2627,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         // a swatch to ink the selection / typing color, click the ring to go
         // back to the default white. The ring's center fills with the active
         // ink while the tray is collapsed.
-        let ringX: CGFloat = 87
+        let ringX: CGFloat = 62
         let dotY = (Style.stripHeight - 12) / 2
         inkRing = inkButton(at: NSPoint(x: ringX, y: dotY), action: #selector(inkRingTapped))
         inkRing.layer?.borderWidth = 1.5
@@ -2566,15 +2666,6 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             inkButtons.append(dot)
         }
 
-        // switcher dropdown — same note list as the menu-bar item, anchored just
-        // left of the close button so both live top-right.
-        let switcher = symbolButton("list.bullet", point: 12, action: #selector(showSwitcher(_:)))
-        switcher.frame = NSRect(x: strip.bounds.width - 50, y: (Style.stripHeight - 18) / 2,
-                                width: 18, height: 18)
-        switcher.autoresizingMask = [.minXMargin, .minYMargin]
-        switcher.toolTip = "Switch to another note"
-        strip.addSubview(switcher)
-
         // "✕" close, top-right
         let close = chromeButton("✕", size: 18, fontSize: 12)
         close.frame = NSRect(x: strip.bounds.width - 26, y: (Style.stripHeight - 18) / 2,
@@ -2599,21 +2690,29 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         // ---- note drawer: starts tucked away past the left edge ----
         let drawerH = container.bounds.height - Style.stripHeight
                       - Style.drawerInsetTop - Style.drawerInsetBot
-        drawer = NoteDrawer(frame: NSRect(x: -Style.drawerWidth, y: Style.drawerInsetBot,
-                                          width: Style.drawerWidth, height: drawerH))
+        drawer = NoteDrawer(frame: NSRect(x: -drawerWidth, y: Style.drawerInsetBot,
+                                          width: drawerWidth, height: drawerH))
         drawer.autoresizingMask = [.height, .maxXMargin]
         drawer.isHidden = true
         drawer.onOpen = { [weak self] id in self?.manager?.openNote(id: id) }
+        drawer.onDelete = { [weak self] id, title in self?.manager?.confirmDelete(id: id, title: title) }
         drawer.onNew = { [weak self] in self?.manager?.newNote() }
         drawer.onReorder = { [weak self] ids in self?.manager?.setNoteOrder(ids) }
+        drawer.onResize = { [weak self] dx in self?.resizeDrawer(by: dx) }
+        drawer.onResizeEnd = { [weak self] in self?.saveDrawerWidth() }
         container.addSubview(drawer)
 
-        let tabH: CGFloat = 44
+        let tabH = Style.drawerTabH
         drawerTab = DrawerTab(frame: NSRect(x: 2, y: (contentRect.height - tabH) / 2 + Style.padding,
                                             width: 10, height: tabH))
         drawerTab.autoresizingMask = [.minYMargin, .maxYMargin, .maxXMargin]
         drawerTab.toolTip = "Show all notes"
         drawerTab.onTap = { [weak self] in self?.toggleDrawer() }
+        drawerTab.onDrag = { [weak self] dx in
+            guard let self, self.drawerOpen else { return }
+            self.resizeDrawer(by: dx)
+        }
+        drawerTab.onDragEnd = { [weak self] in self?.saveDrawerWidth() }
         container.addSubview(drawerTab)
 
         currentFont = NSFont.systemFont(ofSize: fontSize)
@@ -3670,6 +3769,31 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         drawer.reload(entries: m.drawerEntries(), currentID: id)
     }
 
+    /// Body frame for the current drawer state (open pushes it right).
+    private func bodyFrame(open: Bool) -> NSRect {
+        let cw = container.bounds.width
+        let x = open ? drawerWidth + Style.drawerGap : Style.padding
+        return NSRect(x: x, y: columnsHost.frame.minY,
+                      width: cw - x - Style.padding, height: columnsHost.frame.height)
+    }
+
+    /// Drag on the handle or the drawer's edge: widen/narrow, live, keeping
+    /// the body at least a column wide.
+    private func resizeDrawer(by dx: CGFloat) {
+        let maxW = container.bounds.width - Style.minColumnWidth - Style.drawerGap - Style.padding
+        let w = max(Style.drawerMinWidth, min(maxW, drawerWidth + dx))
+        guard w != drawerWidth else { return }
+        drawerWidth = w
+        drawer.frame = NSRect(x: 0, y: drawer.frame.minY, width: w, height: drawer.frame.height)
+        drawerTab.setFrameOrigin(NSPoint(x: w - 12, y: drawerTab.frame.minY))
+        columnsHost.frame = bodyFrame(open: true)
+    }
+
+    /// One width for every note - the drawer is the same list everywhere.
+    private func saveDrawerWidth() {
+        UserDefaults.standard.set(Double(drawerWidth), forKey: Self.drawerWidthKey)
+    }
+
     /// Slide the drawer in from the left edge (pushing the body right) or back
     /// out. The handle rides the drawer's edge so it's always where you left it.
     private func setDrawer(open: Bool) {
@@ -3689,12 +3813,9 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             NSEvent.removeMonitor(mon)
             drawerEscMonitor = nil
         }
-        let cw = container.bounds.width
-        let bodyX = open ? Style.drawerWidth + Style.drawerGap : Style.padding
-        let body = NSRect(x: bodyX, y: columnsHost.frame.minY,
-                          width: cw - bodyX - Style.padding, height: columnsHost.frame.height)
-        let drawerX: CGFloat = open ? 0 : -Style.drawerWidth
-        let tabX: CGFloat = open ? Style.drawerWidth - 12 : 2
+        let body = bodyFrame(open: open)
+        let drawerX: CGFloat = open ? 0 : -drawerWidth
+        let tabX: CGFloat = open ? drawerWidth - 12 : 2
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.24
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -3807,15 +3928,6 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     }
 
     @objc private func closeNote() { window.close() }
-
-    /// Pop the shared switcher menu down from the toolbar button.
-    @objc private func showSwitcher(_ sender: NSButton) {
-        guard let menu = manager?.makeSwitcherMenu() else { return }
-        // Drop it just below the button (button coords are bottom-left origin).
-        menu.popUp(positioning: nil,
-                   at: NSPoint(x: 0, y: -4),
-                   in: sender)
-    }
 
     /// True when nothing has been typed in any block (no text, no section title).
     /// Equivalent to "no block contributes a summary line."
@@ -4509,14 +4621,6 @@ final class NotesManager: NSObject, NSMenuDelegate {
         statusItem = item
     }
 
-    /// A freshly built switcher menu — used by the in-note toolbar button, which
-    /// pops it up on demand (the menu-bar item builds via the delegate instead).
-    func makeSwitcherMenu() -> NSMenu {
-        let menu = NSMenu()
-        populateSwitcher(menu)
-        return menu
-    }
-
     /// Rebuild the menu-bar switcher each time it opens so it always reflects the
     /// current set of saved notes and which ones are open.
     func menuNeedsUpdate(_ menu: NSMenu) { populateSwitcher(menu) }
@@ -4664,7 +4768,7 @@ final class NotesManager: NSObject, NSMenuDelegate {
     }
 
     /// Confirm, then permanently delete a saved note (file + any open window).
-    private func confirmDelete(id: String, title: String) {
+    func confirmDelete(id: String, title: String) {
         let alert = NSAlert()
         alert.messageText = "Delete “\(title.isEmpty ? "this note" : title)”?"
         alert.informativeText = "This permanently removes the note. It can’t be undone."
