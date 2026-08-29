@@ -104,6 +104,10 @@ private enum Style {
     static let drawerCard      = NSColor(calibratedWhite: 1.0, alpha: 0.07)
     static let drawerCardEdge  = NSColor(calibratedWhite: 1.0, alpha: 0.10)
     static let drawerHover     = NSColor(calibratedWhite: 1.0, alpha: 0.14)
+    // Swipe-to-delete: two-finger swipe a row left and a trash button slides
+    // out from under it (Mail-style); tap it to delete, swipe back to cancel.
+    static let drawerSwipeW:   CGFloat = 52
+    static let drawerDeleteRed = NSColor(calibratedRed: 0.839, green: 0.220, blue: 0.173, alpha: 0.95)
     static let idleTint       = NSColor(calibratedWhite: 0.16, alpha: 0.18)
     static let focusedTint    = NSColor(calibratedWhite: 0.85, alpha: 0.12)
     // Ink swatches — red, green, blue, the green matching the color :math
@@ -2173,27 +2177,117 @@ private final class DrawerTab: NSView {
 /// note; drag past a few points and the row moves within the list instead.
 private final class DrawerRow: NSView {
     let noteID: String
-    var isCurrent = false { didSet { needsDisplay = true } }
+    var isCurrent = false { didSet { card.isCurrent = isCurrent } }
     var onOpen: (() -> Void)?
     var onDelete: (() -> Void)?
     var onDragBegan: (() -> Void)?
     var onDragMoved: ((NSPoint) -> Void)?       // window coordinates
     var onDragEnded: ((Bool) -> Void)?          // true if a drag actually happened
-    private let label = NSTextField(labelWithString: "")
-    private var hovered = false { didSet { needsDisplay = true } }
+    var onSwipeOpened: (() -> Void)?           // so sibling rows can tuck back in
+    private let card = RowCard()
+    private let label = PassThroughLabel(labelWithString: "")
+    private let trash = NSButton()
+    private var hovered = false { didSet { card.hovered = hovered } }
     private var downAt: NSPoint?
     private var dragging = false
+    // Swipe state: how far the card is slid left, and which axis the current
+    // two-finger gesture locked to (so vertical scrolls still reach the list).
+    private var swipe: CGFloat = 0
+    private enum Axis { case undecided, horizontal, vertical }
+    private var axis: Axis = .undecided
 
     init(id: String, title: String) {
         noteID = id
         super.init(frame: NSRect(x: 0, y: 0, width: Style.drawerWidth, height: Style.drawerRowH))
+
+        // Trash sits under the card's right end and shows as the card slides.
+        trash.title = ""
+        trash.isBordered = false
+        trash.setButtonType(.momentaryChange)
+        trash.refusesFirstResponder = true
+        trash.wantsLayer = true
+        trash.layer?.backgroundColor = Style.drawerDeleteRed.cgColor
+        trash.layer?.cornerRadius = 9
+        trash.image = symbolImage("trash", point: 12)
+        trash.imagePosition = .imageOnly
+        trash.contentTintColor = .white
+        trash.toolTip = "Delete note"
+        trash.target = self
+        trash.action = #selector(deleteFromMenu)
+        trash.isHidden = true
+        trash.autoresizingMask = [.minXMargin]
+        addSubview(trash)
+
+        card.frame = bounds
+        card.autoresizingMask = [.width, .height]
+        addSubview(card)
+
         label.stringValue = title.isEmpty ? "Untitled" : title
         label.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
         label.textColor = title.isEmpty ? Style.chromeColor : Style.textColor
         label.lineBreakMode = .byTruncatingTail
         label.frame = NSRect(x: 20, y: (Style.drawerRowH - 17) / 2, width: Style.drawerWidth - 36, height: 17)
         label.autoresizingMask = [.width]
-        addSubview(label)
+        card.addSubview(label)
+        layoutSwipe()
+    }
+
+    override func layout() {
+        super.layout()
+        layoutSwipe()
+    }
+
+    /// Card slid left by `swipe`; trash pinned at the right, only as wide as
+    /// what's been revealed so it never pokes out past the card.
+    private func layoutSwipe() {
+        card.frame = NSRect(x: -swipe, y: 0, width: bounds.width, height: bounds.height)
+        let w = min(Style.drawerSwipeW, max(swipe, 0)) - 6
+        trash.frame = NSRect(x: bounds.width - 8 - max(w, 0), y: 1, width: max(w, 0), height: bounds.height - 2)
+        trash.isHidden = swipe <= 0
+    }
+
+    /// Snap the card open (trash showing) or closed.
+    func setSwipe(open: Bool, animated: Bool = true) {
+        let target: CGFloat = open ? Style.drawerSwipeW : 0
+        guard target != swipe else { return }
+        if animated {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.18
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                ctx.allowsImplicitAnimation = true
+                swipe = target
+                layoutSwipe()
+                card.animator().frame = NSRect(x: -swipe, y: 0, width: bounds.width, height: bounds.height)
+            }
+        } else {
+            swipe = target
+            layoutSwipe()
+        }
+    }
+
+    /// Two-finger swipes. The first meaningful delta picks an axis for the
+    /// whole gesture: sideways slides the card, up/down goes to the scroll
+    /// view like any other scroll. Momentum after a sideways swipe is dropped.
+    override func scrollWheel(with event: NSEvent) {
+        if event.phase == .began { axis = .undecided }
+        if axis == .undecided {
+            let dx = abs(event.scrollingDeltaX), dy = abs(event.scrollingDeltaY)
+            if dx > dy, dx > 0.5 { axis = .horizontal }
+            else if dy > 0 { axis = .vertical }
+        }
+        guard axis == .horizontal else { super.scrollWheel(with: event); return }
+        if event.momentumPhase != [] { return }
+        // Fingers moving left should slide the card left regardless of the
+        // user's scroll-direction setting.
+        let fingers = event.isDirectionInvertedFromDevice ? event.scrollingDeltaX : -event.scrollingDeltaX
+        let opened = swipe > 0
+        swipe = max(0, min(Style.drawerSwipeW * 1.15, swipe - fingers))
+        layoutSwipe()
+        if !opened, swipe > 0 { onSwipeOpened?() }
+        if event.phase == .ended || event.phase == .cancelled {
+            setSwipe(open: swipe > Style.drawerSwipeW * 0.45)
+            axis = .undecided
+        }
     }
     required init?(coder: NSCoder) { fatalError("unused") }
 
@@ -2209,15 +2303,23 @@ private final class DrawerRow: NSView {
     override func mouseEntered(with event: NSEvent) { hovered = true }
     override func mouseExited(with event: NSEvent)  { hovered = false }
 
-    /// Each row is its own little card - fill + hairline edge - so the list
-    /// reads as a stack of notes, not lines of text. Current = selection blue.
-    override func draw(_ dirtyRect: NSRect) {
-        let card = NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0.5), xRadius: 9, yRadius: 9)
-        (isCurrent ? Style.selectionColor : hovered ? Style.drawerHover : Style.drawerCard).setFill()
-        card.fill()
-        Style.drawerCardEdge.setStroke()
-        card.lineWidth = 1
-        card.stroke()
+    /// The card face, drawn by RowCard (a plain click-through subview so the
+    /// row keeps every mouse event and the card can slide for swipe-to-delete).
+    private final class RowCard: NSView {
+        var isCurrent = false { didSet { needsDisplay = true } }
+        var hovered = false { didSet { needsDisplay = true } }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func draw(_ dirtyRect: NSRect) {
+            let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0.5), xRadius: 9, yRadius: 9)
+            (isCurrent ? Style.selectionColor : hovered ? Style.drawerHover : Style.drawerCard).setFill()
+            path.fill()
+            Style.drawerCardEdge.setStroke()
+            path.lineWidth = 1
+            path.stroke()
+        }
+    }
+    private final class PassThroughLabel: NSTextField {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -2231,6 +2333,7 @@ private final class DrawerRow: NSView {
     @objc private func deleteFromMenu() { onDelete?() }
 
     override func mouseDown(with event: NSEvent) {
+        if swipe > 0 { setSwipe(open: false); downAt = nil; return }
         downAt = event.locationInWindow
         dragging = false
     }
@@ -2293,8 +2396,6 @@ private final class NoteDrawer: NSView {
         clip.layer?.cornerCurve = .continuous
         clip.layer?.maskedCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
         clip.layer?.masksToBounds = true
-        clip.layer?.borderWidth = 1
-        clip.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.14).cgColor
         addSubview(clip)
 
         let r = Style.drawerRadius
@@ -2372,6 +2473,9 @@ private final class NoteDrawer: NSView {
             r.heightAnchor.constraint(equalToConstant: Style.drawerRowH).isActive = true
             r.onOpen = { [weak self] in self?.onOpen?(e.id) }
             r.onDelete = { [weak self] in self?.onDelete?(e.id, e.title) }
+            r.onSwipeOpened = { [weak self, weak r] in
+                self?.rows.forEach { if $0 !== r { $0.setSwipe(open: false) } }
+            }
             r.onDragBegan = { [weak self] in self?.dropIndex = nil }
             r.onDragMoved = { [weak self, weak r] p in
                 guard let self, let r else { return }
