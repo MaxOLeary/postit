@@ -54,7 +54,8 @@ otherwise the ink you type with from the cursor on.
 | `BB` | blue ink |
 | `WW` | back to default white |
 | `##` | insert a collapsible section at the cursor |
-| Shift+Up / Shift+Down | step the font size at the cursor |
+| `- ` at the start of a line | bullet list; Enter continues it, Enter on an empty bullet ends it, Tab / Shift+Tab nest |
+| Cmd+= / Cmd+- | bigger / smaller text at the cursor |
 | `:math` on its own line | live calculator for the lines below (`:end` stops it) |
 
 Plus the standard menu shortcuts: Cmd+N new note, Cmd+W close note,

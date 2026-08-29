@@ -88,6 +88,17 @@ private enum Style {
     static let dockGlowColor   = NSColor(calibratedWhite: 1.0, alpha: 0.30)
     // Two tints: the calm look when idle, and a brighter one while focused to
     // counteract macOS dimming the glass on the active window.
+    // Note drawer: a thin bar tucked into the left padding at half height;
+    // click it and a note-card listing every saved note slides in from the
+    // left edge, pushing the body text right. Fixed order, drag rows to move.
+    static let drawerWidth:    CGFloat = 124
+    static let drawerGap:      CGFloat = 10      // between the drawer and the body
+    static let drawerInsetTop: CGFloat = 8       // below the toolbar strip
+    static let drawerInsetBot: CGFloat = 10
+    static let drawerRadius:   CGFloat = 18
+    static let drawerRowH:     CGFloat = 26
+    static let drawerFill      = NSColor(calibratedRed: 0.13, green: 0.17, blue: 0.19, alpha: 0.90)
+    static let drawerHover     = NSColor(calibratedWhite: 1.0, alpha: 0.08)
     static let idleTint       = NSColor(calibratedWhite: 0.16, alpha: 0.18)
     static let focusedTint    = NSColor(calibratedWhite: 0.85, alpha: 0.12)
     // Ink swatches — red, green, blue, the green matching the color :math
@@ -406,6 +417,7 @@ final class NoteStore {
         note.resolvedColumns.map { col in
             col.compactMap { b -> String? in
                 let body = b.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .components(separatedBy: "\n").map(Bullets.markdownLine).joined(separator: "\n")
                 guard b.kind == .section else { return body.isEmpty ? nil : body }
                 let title = b.title.trimmingCharacters(in: .whitespaces)
                 let head = "## \(title.isEmpty ? "Untitled section" : title)"
@@ -477,6 +489,58 @@ final class NoteStore {
         pending = nil
         try? FileManager.default.removeItem(at: url)
         deleteMirror()
+    }
+}
+
+// MARK: - Bullets
+
+/// Bulleted lines: a glyph-plus-space prefix on the paragraph text and a
+/// hanging indent in its paragraph style, so wrapped lines line up under the
+/// text rather than the dot. The glyph doubles as the nesting level (• ◦ ▪),
+/// which is what lets the plain-text/Markdown side recover the depth.
+enum Bullets {
+    static let glyphs: [Character] = ["•", "◦", "▪"]
+    static var maxLevel: Int { glyphs.count - 1 }
+
+    /// True when the text holds nothing but whitespace and bullet dots — an
+    /// "empty" note the user only ever tabbed a bullet into.
+    static func isBlank(_ text: String) -> Bool {
+        !text.contains { !$0.isWhitespace && !glyphs.contains($0) }
+    }
+    /// Extra left indent per nesting level, in points.
+    static let step: CGFloat = 18
+
+    /// Characters that, followed by a space at the start of a line, turn the
+    /// line into a bullet.
+    static let triggers: Set<Character> = ["-", "*"]
+
+    static func prefix(level: Int) -> String {
+        String(glyphs[max(0, min(level, maxLevel))]) + " "
+    }
+
+    /// Nesting level of a paragraph that starts with a bullet prefix, or nil.
+    static func level(of paragraph: String) -> Int? {
+        guard let first = paragraph.first, paragraph.dropFirst().first == " " else { return nil }
+        return glyphs.firstIndex(of: first)
+    }
+
+    /// Paragraph style for a bullet at `level`: the dot sits at the level's
+    /// indent, and every wrapped line starts after the dot.
+    static func paragraphStyle(level: Int, font: NSFont) -> NSParagraphStyle {
+        let ps = NSMutableParagraphStyle()
+        let left = CGFloat(level) * step
+        let glyphWidth = (prefix(level: level) as NSString)
+            .size(withAttributes: [.font: font]).width
+        ps.firstLineHeadIndent = left
+        ps.headIndent = left + glyphWidth
+        return ps
+    }
+
+    /// Markdown for one plain-text line: bullet prefixes become `- ` with two
+    /// spaces of indent per level; anything else passes through.
+    static func markdownLine(_ line: String) -> String {
+        guard let lvl = level(of: line) else { return line }
+        return String(repeating: "  ", count: lvl) + "- " + line.dropFirst(2)
     }
 }
 
@@ -556,8 +620,9 @@ enum WelcomeNote {
                 ("Shift + ", nil), ("BB", ink("B")), ("   blue ink\n", nil),
                 ("Shift + WW   back to white\n", nil),
                 ("Shift + ##   a new dropdown menu\n", nil),
+                ("- ␣   start a bullet list (Tab / Shift+Tab nest it, Enter on an empty bullet ends it)\n", nil),
                 ("""
-                 Shift+↑ / Shift+↓   increase / decrease font
+                 Cmd+= / Cmd+-   bigger / smaller text
                  Cmd+N   new note
                  Cmd+W   close this note (it stays saved)
                  Cmd+Z / Cmd+Shift+Z   undo / redo
@@ -1589,8 +1654,8 @@ final class GrowingTextView: NSTextView {
 extension GrowingTextView: BlockView {
     func asBlock() -> Block { Block(kind: .text, rtf: rtfBase64, text: string) }
     var summaryText: String? {
-        let t = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        return t.isEmpty ? nil : t
+        if Bullets.isBlank(string) { return nil }
+        return string.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     var primaryTextView: NSTextView { self }
     func owns(_ tv: NSTextView) -> Bool { tv === self }
@@ -2029,14 +2094,239 @@ extension SectionView: BlockView {
     var summaryText: String? {
         let t = title.trimmingCharacters(in: .whitespaces)
         if !t.isEmpty { return t }
-        let b = body.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        return b.isEmpty ? nil : b
+        if Bullets.isBlank(body.string) { return nil }
+        return body.string.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     var primaryTextView: NSTextView { body }
     func owns(_ tv: NSTextView) -> Bool { tv === body }
 }
 
 /// Which vertical edge of a note another note is hovering over / docking to.
+
+// MARK: - Note drawer
+
+/// The drawer's handle: a bare 2×16 bar (no pill around it) that brightens on
+/// hover. Sits in the note's left padding while the drawer is closed and rides
+/// the drawer's right edge while it's open. Eats its own mouse-down so the
+/// click never turns into a window drag.
+private final class DrawerTab: NSView {
+    var onTap: (() -> Void)?
+    private var hot = false { didSet { needsDisplay = true } }
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.mouseEnteredAndExited, .activeAlways],
+                                       owner: self, userInfo: nil))
+    }
+    override func mouseEntered(with event: NSEvent) { hot = true }
+    override func mouseExited(with event: NSEvent)  { hot = false }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onTap?() }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let w: CGFloat = 2, h: CGFloat = 16
+        let bar = NSRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
+        (hot ? Style.textColor : Style.chromeColor).setFill()
+        NSBezierPath(roundedRect: bar, xRadius: 1, yRadius: 1).fill()
+    }
+}
+
+/// One note in the drawer list: the note's first line, a hover tint, and the
+/// selection blue when it's the note this drawer belongs to. Click opens the
+/// note; drag past a few points and the row moves within the list instead.
+private final class DrawerRow: NSView {
+    let noteID: String
+    var isCurrent = false { didSet { needsDisplay = true } }
+    var onOpen: (() -> Void)?
+    var onDragBegan: (() -> Void)?
+    var onDragMoved: ((NSPoint) -> Void)?       // window coordinates
+    var onDragEnded: ((Bool) -> Void)?          // true if a drag actually happened
+    private let label = NSTextField(labelWithString: "")
+    private var hovered = false { didSet { needsDisplay = true } }
+    private var downAt: NSPoint?
+    private var dragging = false
+
+    init(id: String, title: String) {
+        noteID = id
+        super.init(frame: NSRect(x: 0, y: 0, width: Style.drawerWidth, height: Style.drawerRowH))
+        label.stringValue = title.isEmpty ? "Untitled" : title
+        label.font = NSFont.systemFont(ofSize: 12)
+        label.textColor = title.isEmpty ? Style.chromeColor : Style.textColor
+        label.lineBreakMode = .byTruncatingTail
+        label.frame = NSRect(x: 14, y: (Style.drawerRowH - 16) / 2, width: Style.drawerWidth - 24, height: 16)
+        label.autoresizingMask = [.width]
+        addSubview(label)
+    }
+    required init?(coder: NSCoder) { fatalError("unused") }
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.mouseEnteredAndExited, .activeAlways],
+                                       owner: self, userInfo: nil))
+    }
+    override func mouseEntered(with event: NSEvent) { hovered = true }
+    override func mouseExited(with event: NSEvent)  { hovered = false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard isCurrent || hovered else { return }
+        (isCurrent ? Style.selectionColor : Style.drawerHover).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 1), xRadius: 6, yRadius: 6).fill()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        downAt = event.locationInWindow
+        dragging = false
+    }
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = downAt else { return }
+        let p = event.locationInWindow
+        if !dragging, hypot(p.x - start.x, p.y - start.y) > Style.dragThreshold {
+            dragging = true
+            alphaValue = Style.dragSourceAlpha
+            onDragBegan?()
+        }
+        if dragging { onDragMoved?(p) }
+    }
+    override func mouseUp(with event: NSEvent) {
+        let wasDrag = dragging
+        downAt = nil
+        dragging = false
+        alphaValue = 1
+        onDragEnded?(wasDrag)
+        if !wasDrag, bounds.contains(convert(event.locationInWindow, from: nil)) { onOpen?() }
+    }
+}
+
+/// The slide-in note-card: flat on the left where it joins the note's edge,
+/// rounded on the right, its own glass edge and shadow. Holds a "NOTES" header
+/// with a "+" for a new note, and a scrolling list of DrawerRows. Reordering
+/// happens here: a dragged row's landing slot is shown with a thin blue line.
+private final class NoteDrawer: NSView {
+    var onOpen: ((String) -> Void)?
+    var onNew: (() -> Void)?
+    var onReorder: (([String]) -> Void)?
+    private let scroll = NSScrollView()
+    private let stack = FlippedStack()
+    private var rows: [DrawerRow] = []
+    private weak var marker: NSView?
+    private var dropIndex: Int?
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = Style.drawerFill.cgColor
+        layer?.cornerRadius = Style.drawerRadius
+        layer?.maskedCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.12).cgColor
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.45
+        layer?.shadowRadius = 14
+        layer?.shadowOffset = CGSize(width: 0, height: -6)
+        layer?.masksToBounds = false
+
+        let header = NSTextField(labelWithString: "NOTES")
+        header.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        header.textColor = Style.chromeColor
+        header.frame = NSRect(x: 14, y: frame.height - 24, width: 60, height: 14)
+        header.autoresizingMask = [.minYMargin]
+        addSubview(header)
+
+        let plus = chromeSymbolButton("plus", point: 10, target: self, action: #selector(newTapped))
+        plus.frame = NSRect(x: frame.width - 28, y: frame.height - 26, width: 18, height: 18)
+        plus.autoresizingMask = [.minYMargin, .minXMargin]
+        plus.toolTip = "New note"
+        addSubview(plus)
+
+        scroll.frame = NSRect(x: 0, y: 8, width: frame.width, height: frame.height - 38)
+        scroll.autoresizingMask = [.width, .height]
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.scrollerStyle = .overlay          // slim, auto-hiding
+        scroll.autohidesScrollers = true
+        scroll.verticalScrollElasticity = .allowed
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = stack
+        stack.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor).isActive = true
+        addSubview(scroll)
+    }
+    required init?(coder: NSCoder) { fatalError("unused") }
+
+    @objc private func newTapped() { onNew?() }
+
+    /// Rebuild the rows from the current ordered list.
+    func reload(entries: [(id: String, title: String)], currentID: String) {
+        rows.forEach { stack.removeArrangedSubview($0); $0.removeFromSuperview() }
+        rows = entries.map { e in
+            let r = DrawerRow(id: e.id, title: e.title)
+            r.isCurrent = e.id == currentID
+            r.translatesAutoresizingMaskIntoConstraints = false
+            r.heightAnchor.constraint(equalToConstant: Style.drawerRowH).isActive = true
+            r.onOpen = { [weak self] in self?.onOpen?(e.id) }
+            r.onDragBegan = { [weak self] in self?.dropIndex = nil }
+            r.onDragMoved = { [weak self, weak r] p in
+                guard let self, let r else { return }
+                self.trackDrag(of: r, at: p)
+            }
+            r.onDragEnded = { [weak self, weak r] moved in
+                guard let self, let r else { return }
+                self.finishDrag(of: r, moved: moved)
+            }
+            return r
+        }
+        rows.forEach { stack.addArrangedSubview($0) }
+        for r in rows { r.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
+    }
+
+    /// Where a dragged row would land: the slot whose top is nearest the
+    /// mouse, drawn as a thin line between rows (or under the last one).
+    private func trackDrag(of row: DrawerRow, at windowPoint: NSPoint) {
+        let p = stack.convert(windowPoint, from: nil)          // flipped: y grows downward
+        var idx = rows.filter { $0.frame.midY < p.y }.count
+        idx = max(0, min(rows.count, idx))
+        dropIndex = idx
+        let y = idx < rows.count ? rows[idx].frame.minY : (rows.last?.frame.maxY ?? 0)
+        if marker == nil {
+            let m = NSView()
+            m.wantsLayer = true
+            m.layer?.backgroundColor = Style.dropMarkerColor.cgColor
+            m.layer?.cornerRadius = 1
+            stack.addSubview(m)
+            marker = m
+        }
+        marker?.frame = NSRect(x: 8, y: y - 1, width: stack.bounds.width - 16, height: 2)
+    }
+
+    private func finishDrag(of row: DrawerRow, moved: Bool) {
+        marker?.removeFromSuperview()
+        guard moved, let to = dropIndex,
+              let from = rows.firstIndex(where: { $0 === row }) else { return }
+        var ids = rows.map(\.noteID)
+        let id = ids.remove(at: from)
+        let insertAt = to > from ? to - 1 : to
+        ids.insert(id, at: max(0, min(ids.count, insertAt)))
+        guard ids != rows.map(\.noteID) else { return }
+        onReorder?(ids)
+    }
+}
+
 enum DockSide { case left, right }
 
 // MARK: - One note
@@ -2062,6 +2352,11 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     // SectionView for folds). A plain note has exactly one column; conjoined
     // notes have more, split by draggable dividers.
     private var columnsHost: ColumnsHost!
+    // The slide-in note list and its handle (see Style.drawer*).
+    private var drawer: NoteDrawer!
+    private var drawerTab: DrawerTab!
+    private var drawerOpen = false
+    private var drawerEscMonitor: Any?
     private var columns: [NoteColumn] = []
     private var dividers: [ColumnDivider] = []
     // Per-column width fractions (parallel to `columns`, sums to 1). Equal by
@@ -2300,6 +2595,26 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         columnsHost.autoresizingMask = [.width, .height]
         columnsHost.relayout = { [weak self] in self?.layoutColumns() }
         container.addSubview(columnsHost)
+
+        // ---- note drawer: starts tucked away past the left edge ----
+        let drawerH = container.bounds.height - Style.stripHeight
+                      - Style.drawerInsetTop - Style.drawerInsetBot
+        drawer = NoteDrawer(frame: NSRect(x: -Style.drawerWidth, y: Style.drawerInsetBot,
+                                          width: Style.drawerWidth, height: drawerH))
+        drawer.autoresizingMask = [.height, .maxXMargin]
+        drawer.isHidden = true
+        drawer.onOpen = { [weak self] id in self?.manager?.openNote(id: id) }
+        drawer.onNew = { [weak self] in self?.manager?.newNote() }
+        drawer.onReorder = { [weak self] ids in self?.manager?.setNoteOrder(ids) }
+        container.addSubview(drawer)
+
+        let tabH: CGFloat = 44
+        drawerTab = DrawerTab(frame: NSRect(x: 2, y: (contentRect.height - tabH) / 2 + Style.padding,
+                                            width: 10, height: tabH))
+        drawerTab.autoresizingMask = [.minYMargin, .maxYMargin, .maxXMargin]
+        drawerTab.toolTip = "Show all notes"
+        drawerTab.onTap = { [weak self] in self?.toggleDrawer() }
+        container.addSubview(drawerTab)
 
         currentFont = NSFont.systemFont(ofSize: fontSize)
         for blocks in data.resolvedColumns {
@@ -3344,6 +3659,56 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     }
 
     /// Slide the swatch dots out from behind the ring, or tuck them back under.
+    // MARK: note drawer
+
+    @objc private func toggleDrawer() { setDrawer(open: !drawerOpen) }
+
+    /// Rebuild the drawer's rows from the manager's ordered list (cheap: the
+    /// store decodes only id + first line per note).
+    func refreshDrawer() {
+        guard drawer != nil, drawerOpen, let m = manager else { return }
+        drawer.reload(entries: m.drawerEntries(), currentID: id)
+    }
+
+    /// Slide the drawer in from the left edge (pushing the body right) or back
+    /// out. The handle rides the drawer's edge so it's always where you left it.
+    private func setDrawer(open: Bool) {
+        guard open != drawerOpen else { return }
+        drawerOpen = open
+        if open {
+            refreshDrawer()
+            drawer.isHidden = true
+            drawer.isHidden = false
+            let mon = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] ev in
+                guard let self, ev.keyCode == 53, ev.window === self.window else { return ev }
+                self.setDrawer(open: false)
+                return nil
+            }
+            drawerEscMonitor = mon
+        } else if let mon = drawerEscMonitor {
+            NSEvent.removeMonitor(mon)
+            drawerEscMonitor = nil
+        }
+        let cw = container.bounds.width
+        let bodyX = open ? Style.drawerWidth + Style.drawerGap : Style.padding
+        let body = NSRect(x: bodyX, y: columnsHost.frame.minY,
+                          width: cw - bodyX - Style.padding, height: columnsHost.frame.height)
+        let drawerX: CGFloat = open ? 0 : -Style.drawerWidth
+        let tabX: CGFloat = open ? Style.drawerWidth - 12 : 2
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.24
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.allowsImplicitAnimation = true
+            drawer.animator().setFrameOrigin(NSPoint(x: drawerX, y: drawer.frame.minY))
+            drawerTab.animator().setFrameOrigin(NSPoint(x: tabX, y: drawerTab.frame.minY))
+            columnsHost.animator().frame = body
+        }, completionHandler: { [weak self] in
+            guard let self, !self.drawerOpen else { return }
+            self.drawer.isHidden = true
+        })
+        drawerTab.toolTip = open ? "Hide the note list" : "Show all notes"
+    }
+
     private func setInkTray(expanded: Bool) {
         guard expanded != inkTrayExpanded else { return }
         inkTrayExpanded = expanded
@@ -3506,6 +3871,15 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             pendingShortcut = nil               // any other typing breaks the pair
         }
 
+        // "- " or "* " at the start of a line → a bullet. The dash is already
+        // in the text; swap it for the bullet prefix and swallow the space.
+        if replacementString == " ", affectedCharRange.length == 0,
+           !textView.hasMarkedText(), startsBulletTrigger(at: affectedCharRange.location, in: textView) {
+            let para = paragraphRange(in: textView, at: affectedCharRange.location)
+            setBullet(level: 0, on: para, in: textView)
+            return false
+        }
+
         // Backspacing the letter the auto-cap just uppercased reads as
         // "I wanted lowercase" — arm the one-shot bypass for that spot.
         let tvID = ObjectIdentifier(textView)
@@ -3587,6 +3961,8 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             let char = Character(scalar)
             if char == " " || char == "\t" { sawSpace = true; i -= 1; continue }
             if char.isNewline { return true }
+            if sawSpace, Bullets.glyphs.contains(char),
+               i == paragraphRange(in: tv, at: i).location { return true }
             return sawSpace && ".!?".contains(char)
         }
         return true                             // nothing before it — block start
@@ -3627,22 +4003,144 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         }
     }
 
-    /// Shift+Up / Shift+Down step the font size at the cursor (resizing the
-    /// selection too, if there is one) — trades AppKit's line-wise selection
-    /// extension for a quick size knob.
+    /// Cmd+= / Cmd+- (Edit menu) step the font size at the cursor, resizing
+    /// the selection too if there is one. The window delegate sits in the
+    /// responder chain, so the menu items reach here from any block.
+    @objc func biggerText(_ sender: Any?) { changeFont(by: +1) }
+    @objc func smallerText(_ sender: Any?) { changeFont(by: -1) }
+
+    /// Enter / Backspace / Tab get bullet handling before AppKit sees them.
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         switch commandSelector {
-        case #selector(NSResponder.moveUpAndModifySelection(_:)):
-            changeFont(by: +1)
-            return true
-        case #selector(NSResponder.moveDownAndModifySelection(_:)):
-            changeFont(by: -1)
-            return true
         case #selector(NSResponder.deleteBackward(_:)):
-            return backspaceAcrossBlocks(textView)
+            return backspaceOutOfBullet(textView) || backspaceAcrossBlocks(textView)
+        case #selector(NSResponder.insertNewline(_:)):
+            return newlineInBullet(textView)
+        case #selector(NSResponder.insertTab(_:)):
+            return nestBullet(textView, by: +1)
+        case #selector(NSResponder.insertBacktab(_:)):
+            return nestBullet(textView, by: -1)
         default:
             return false
         }
+    }
+
+    // MARK: bullets
+
+    /// The paragraph (line) containing `location`, newline included.
+    private func paragraphRange(in tv: NSTextView, at location: Int) -> NSRange {
+        let s = tv.string as NSString
+        return s.paragraphRange(for: NSRange(location: min(location, s.length), length: 0))
+    }
+
+    /// Nesting level if the paragraph at `range` is a bullet line, else nil.
+    private func bulletLevel(of range: NSRange, in tv: NSTextView) -> Int? {
+        Bullets.level(of: (tv.string as NSString).substring(with: range))
+    }
+
+    /// True when the space being typed at `location` would complete a "- " or
+    /// "* " trigger: the paragraph so far is exactly one trigger character.
+    private func startsBulletTrigger(at location: Int, in tv: NSTextView) -> Bool {
+        let para = paragraphRange(in: tv, at: location)
+        guard location == para.location + 1 else { return false }
+        let s = tv.string as NSString
+        guard let scalar = Unicode.Scalar(s.character(at: para.location)) else { return false }
+        return Bullets.triggers.contains(Character(scalar))
+    }
+
+    /// Make the paragraph at `range` a bullet at `level` (nil removes the
+    /// bullet). Rewrites the prefix and paragraph style as one undoable edit
+    /// and leaves the cursor where it was, relative to the text.
+    private func setBullet(level: Int?, on range: NSRange, in tv: NSTextView) {
+        guard let ts = tv.textStorage else { return }
+        let s = tv.string as NSString
+        let text = s.substring(with: range)
+        // Strip a "- "/"* " trigger or an existing bullet prefix.
+        var stripLen = 0
+        if Bullets.level(of: text) != nil { stripLen = 2 }
+        else if let f = text.first, Bullets.triggers.contains(f) {
+            stripLen = text.dropFirst().first == " " ? 2 : 1
+        }
+        let newPrefix = level.map(Bullets.prefix(level:)) ?? ""
+        let old = NSRange(location: range.location, length: stripLen)
+        let sel = tv.selectedRange()
+        guard tv.shouldChangeText(in: old, replacementString: newPrefix) else { return }
+        ts.beginEditing()
+        ts.replaceCharacters(in: old, with: NSAttributedString(
+            string: newPrefix, attributes: [.font: currentFont, .foregroundColor: ink ?? Style.textColor]))
+        let para = NSRange(location: range.location, length: range.length - stripLen + (newPrefix as NSString).length)
+        if let lvl = level {
+            ts.addAttribute(.paragraphStyle, value: Bullets.paragraphStyle(level: lvl, font: currentFont), range: para)
+        } else {
+            ts.removeAttribute(.paragraphStyle, range: para)
+        }
+        ts.endEditing()
+        tv.didChangeText()
+        // Keep the caret on the same character it was on, shifted by the
+        // prefix change; never before the new prefix.
+        let delta = (newPrefix as NSString).length - stripLen
+        var loc = sel.location
+        if sel.location >= range.location {
+            loc = max(loc + delta, range.location + (newPrefix as NSString).length)
+        }
+        tv.setSelectedRange(NSRange(location: min(max(loc, 0), (tv.string as NSString).length), length: 0))
+        tv.typingAttributes[.paragraphStyle] = level.map { Bullets.paragraphStyle(level: $0, font: currentFont) }
+        saveDebounced()
+    }
+
+    /// Enter on a bullet line: an empty bullet ends the list, otherwise the
+    /// next line starts with the same bullet.
+    private func newlineInBullet(_ tv: NSTextView) -> Bool {
+        let sel = tv.selectedRange()
+        let para = paragraphRange(in: tv, at: sel.location)
+        guard let lvl = bulletLevel(of: para, in: tv) else { return false }
+        let s = tv.string as NSString
+        let body = s.substring(with: para).dropFirst(2).trimmingCharacters(in: .whitespacesAndNewlines)
+        if body.isEmpty {
+            setBullet(level: nil, on: para, in: tv)
+            return true
+        }
+        let insert = "\n" + Bullets.prefix(level: lvl)
+        guard tv.shouldChangeText(in: sel, replacementString: insert) else { return true }
+        tv.textStorage?.replaceCharacters(in: sel, with: NSAttributedString(
+            string: insert, attributes: [.font: currentFont, .foregroundColor: ink ?? Style.textColor,
+                                         .paragraphStyle: Bullets.paragraphStyle(level: lvl, font: currentFont)]))
+        tv.didChangeText()
+        tv.setSelectedRange(NSRange(location: sel.location + (insert as NSString).length, length: 0))
+        saveDebounced()
+        return true
+    }
+
+    /// Backspace with the caret right after the bullet prefix removes the
+    /// bullet instead of eating the space.
+    private func backspaceOutOfBullet(_ tv: NSTextView) -> Bool {
+        let sel = tv.selectedRange()
+        guard sel.length == 0 else { return false }
+        let para = paragraphRange(in: tv, at: sel.location)
+        guard bulletLevel(of: para, in: tv) != nil, sel.location == para.location + 2 else { return false }
+        setBullet(level: nil, on: para, in: tv)
+        return true
+    }
+
+    /// Tab / Shift+Tab on bullet lines nests them one level in or out. Falls
+    /// through (inserts a real tab) when the caret isn't on a bullet.
+    private func nestBullet(_ tv: NSTextView, by delta: Int) -> Bool {
+        let sel = tv.selectedRange()
+        let s = tv.string as NSString
+        let span = s.paragraphRange(for: sel)
+        // Collect the bullet paragraphs in the selection, last first so
+        // earlier ranges stay valid while we edit.
+        var paras: [(NSRange, Int)] = []
+        s.enumerateSubstrings(in: span, options: [.byParagraphs, .substringNotRequired]) { _, _, enclosing, _ in
+            if let lvl = self.bulletLevel(of: enclosing, in: tv) { paras.append((enclosing, lvl)) }
+        }
+        guard !paras.isEmpty else { return false }
+        for (range, lvl) in paras.reversed() {
+            let next = max(0, min(lvl + delta, Bullets.maxLevel))
+            if next != lvl { setBullet(level: next, on: range, in: tv) }
+        }
+        if sel.length > 0 { tv.setSelectedRange(s.paragraphRange(for: sel)) }
+        return true
     }
 
     /// Backspace with the cursor at the very start of a top-level text block:
@@ -3816,9 +4314,9 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         window.close()
     }
 
-    /// Called on app quit — flush without deleting empties (avoids surprise
-    /// data loss; a still-empty note just reopens empty next launch).
-    func flush() { store.saveNow(snapshot()) }
+    /// Called on app quit — same rule as closing: an empty note leaves no
+    /// file behind, a real one flushes to disk.
+    func flush() { if isEmpty { store.delete() } else { store.saveNow(snapshot()) } }
 }
 
 // MARK: - Manager
@@ -4098,7 +4596,7 @@ final class NotesManager: NSObject, NSMenuDelegate {
     private func populateSwitcher(_ menu: NSMenu) {
         menu.removeAllItems()
 
-        let heads = NoteStore.loadHeads()
+        let heads = orderedHeads()
         let openByID = Dictionary(controllers.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
 
         if heads.isEmpty {
@@ -4123,8 +4621,40 @@ final class NotesManager: NSObject, NSMenuDelegate {
                                 keyEquivalent: "q"))
     }
 
+    // MARK: note order (drawer)
+
+    private static let orderKey = "NoteOrder"
+
+    /// Every saved note in the user's order: the saved id list first (ids
+    /// whose file is gone are dropped), then anything new at the bottom in
+    /// creation order. Never auto-sorted by edit time - notes stay where you
+    /// put them.
+    private func orderedHeads() -> [(id: String, title: String)] {
+        let heads = NoteStore.loadHeads()
+        let saved = UserDefaults.standard.stringArray(forKey: Self.orderKey) ?? []
+        let byID = Dictionary(heads.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var out: [(id: String, title: String)] = []
+        var seen = Set<String>()
+        for id in saved { if let h = byID[id], seen.insert(id).inserted { out.append(h) } }
+        for h in heads where !seen.contains(h.id) { out.append(h) }
+        return out
+    }
+
+    /// The drawer's rows: ordered, with live titles for open notes.
+    func drawerEntries() -> [(id: String, title: String)] {
+        let openByID = Dictionary(controllers.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return orderedHeads().map { ($0.id, openByID[$0.id]?.displayTitle ?? $0.title) }
+    }
+
+    /// A row was dragged to a new slot: persist the full order and refresh
+    /// every open drawer so they all agree.
+    func setNoteOrder(_ ids: [String]) {
+        UserDefaults.standard.set(ids, forKey: Self.orderKey)
+        controllers.forEach { $0.refreshDrawer() }
+    }
+
     /// Front an already-open note, or load it from disk and open it.
-    private func openNote(id: String) {
+    func openNote(id: String) {
         if let existing = controllers.first(where: { $0.id == id }) {
             existing.focus()
         } else if let data = NoteStore.load(id: id) {
@@ -4152,6 +4682,7 @@ final class NotesManager: NSObject, NSMenuDelegate {
     private func deleteNote(id: String) {
         if let c = controllers.first(where: { $0.id == id }) { c.discard() }
         NoteStore(id: id).delete()
+        controllers.forEach { $0.refreshDrawer() }
     }
 
     @discardableResult
@@ -4170,6 +4701,7 @@ final class NotesManager: NSObject, NSMenuDelegate {
         }
         let c = open(data)
         c.windowRef.makeKeyAndOrderFront(nil)
+        controllers.forEach { $0.refreshDrawer() }   // it lists once it has text
     }
 
     func controllerDidClose(_ c: NoteController) {
@@ -4225,6 +4757,9 @@ private func makeMainMenu() -> NSMenu {
     editMenu.addItem(withTitle: "Copy",       action: #selector(NSText.copy(_:)),      keyEquivalent: "c")
     editMenu.addItem(withTitle: "Paste",      action: #selector(NSText.paste(_:)),     keyEquivalent: "v")
     editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    editMenu.addItem(.separator())
+    editMenu.addItem(withTitle: "Bigger Text",  action: #selector(NoteController.biggerText(_:)),  keyEquivalent: "=")
+    editMenu.addItem(withTitle: "Smaller Text", action: #selector(NoteController.smallerText(_:)), keyEquivalent: "-")
     editMenu.addItem(.separator())
     editMenu.addItem(withTitle: "Close",      action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
     editItem.submenu = editMenu
