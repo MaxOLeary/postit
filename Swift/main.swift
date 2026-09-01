@@ -26,7 +26,7 @@
 //   Persistence      NoteStore: per-note JSON on disk + the Markdown mirror
 //   Math engine      MathEngine + CurrencyRates — ":math" mode evaluation;
 //                    results are draw-time only, never in the saved note
-//   Window           GlassWindow, the borderless key-taking panel
+//   Window           GlassWindow, the borderless key-taking window
 //   Block views      column plumbing (grip, divider) and the two block view
 //                    types (growing text view, collapsible section)
 //   One note         NoteController — builds a window, owns its columns,
@@ -97,7 +97,7 @@ private enum Style {
     static let drawerInsetTop: CGFloat = 8       // below the toolbar strip
     static let drawerInsetBot: CGFloat = cornerRadius + 2   // clear of the corner curve
     static let drawerRadius:   CGFloat = 18
-    static let drawerTabH:     CGFloat = 80
+    static let drawerTabH:     CGFloat = 160
     static let drawerRowH:     CGFloat = 34
     static let drawerRowGap:   CGFloat = 6
     static let drawerTint      = NSColor(calibratedWhite: 0.85, alpha: 0.10)
@@ -292,6 +292,18 @@ struct NoteData: Codable {
     /// A short label for the menu-bar switcher: the first non-empty line,
     /// trimmed and capped. Empty notes read as "Untitled note".
     var displayTitle: String { NoteData.title(from: text) }
+
+    /// True when nothing was ever typed: every block's plain text is blank
+    /// (whitespace / bullet dots only) and no section has a title. Blank
+    /// notes should never persist, so a saved file matching this is a ghost.
+    var isBlank: Bool {
+        resolvedColumns.allSatisfy { col in
+            col.allSatisfy {
+                Bullets.isBlank($0.text)
+                    && $0.title.trimmingCharacters(in: .whitespaces).isEmpty
+            }
+        }
+    }
 
     static func title(from raw: String) -> String {
         // Skip the math-mode marker lines so a note that opens with ":math"
@@ -492,6 +504,18 @@ final class NoteStore {
         writeMirror(note)
     }
 
+    /// Launch cleanup: a blank note's file should never outlive its window,
+    /// but past bugs and interrupted sessions (crash, force quit) leave some
+    /// behind. Sweep them so "Untitled" ghosts don't pile up in the lists.
+    static func deleteBlankSaved() {
+        for url in noteFiles(sortedBy: .creationDateKey, ascending: true) {
+            guard let data = try? Data(contentsOf: url),
+                  let note = try? JSONDecoder().decode(NoteData.self, from: data),
+                  note.isBlank else { continue }
+            NoteStore(id: note.id).delete()
+        }
+    }
+
     /// Remove the file (used when an empty note is closed).
     func delete() {
         pending?.cancel()
@@ -619,7 +643,7 @@ enum WelcomeNote {
             body([("""
                    Welcome to Postit
 
-                   Notes that float on your desktop.
+                   Notes that sit on your desktop.
                    """, nil)]),
 
             section("Dropdown menu", collapsed: false, [
@@ -662,8 +686,9 @@ enum WelcomeNote {
 
                                          Drag a section by its title to move it around.
 
-                                         Rest the pointer on an idle note and it wakes up \
-                                         with the cursor right where you left it.
+                                         Click a note to bring it forward, click another \
+                                         app to send it behind — same stacking as any \
+                                         other window.
 
                                          The menu-bar icon lists every note you've saved. \
                                          Click one to reopen it, or the ✕ to delete it.
@@ -1276,11 +1301,12 @@ final class CurrencyRates {
 
 // MARK: - Window
 
-/// Borderless panel that can take the keyboard without activating the app —
-/// keeps macOS from re-emphasizing (dimming) the glass while you type.
-final class GlassWindow: NSPanel {
+/// Borderless window that can take key and main (AppKit defaults both to
+/// false for `.borderless`). Stays at the normal window level so notes stack
+/// with other apps instead of floating on top or dropping to the back.
+final class GlassWindow: NSWindow {
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
+    override var canBecomeMain: Bool { true }
 }
 
 // MARK: - Block views
@@ -1998,6 +2024,7 @@ final class SectionView: NSView, NSTextFieldDelegate {
     func setTitleFontSize(_ size: CGFloat) {
         let f = NSFont.systemFont(ofSize: size, weight: .semibold)
         titleField.font = f
+        titleField.invalidateIntrinsicContentSize()
         syncFieldEditor(.font, f)
     }
 
@@ -2114,10 +2141,10 @@ extension SectionView: BlockView {
 
 // MARK: - Note drawer
 
-/// The drawer's handle: a bare 2×16 bar (no pill around it) that brightens on
-/// hover. Sits in the note's left padding while the drawer is closed and rides
-/// the drawer's right edge while it's open. Eats its own mouse-down so the
-/// click never turns into a window drag.
+/// The drawer's handle: a 112×4 pill (ColumnGrip's, stretched), turned vertical,
+/// brightening on hover. Sits in the note's left padding while the drawer is
+/// closed and rides the drawer's right edge while it's open. Eats its own
+/// mouse-down so the click never turns into a window drag.
 private final class DrawerTab: NSView {
     var onTap: (() -> Void)?
     var onDrag: ((CGFloat) -> Void)?           // horizontal delta in window points
@@ -2165,10 +2192,10 @@ private final class DrawerTab: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard drawsBar else { return }
-        let w: CGFloat = 2, h: CGFloat = bounds.height * 0.4
+        let w: CGFloat = 4, h: CGFloat = 112
         let bar = NSRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
-        (hot ? Style.textColor : Style.chromeColor).setFill()
-        NSBezierPath(roundedRect: bar, xRadius: 1, yRadius: 1).fill()
+        Style.chromeColor.withAlphaComponent(hot ? 0.7 : 0.35).setFill()
+        NSBezierPath(roundedRect: bar, xRadius: w / 2, yRadius: w / 2).fill()
     }
 }
 
@@ -2226,7 +2253,7 @@ private final class DrawerRow: NSView {
         label.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
         label.textColor = title.isEmpty ? Style.chromeColor : Style.textColor
         label.lineBreakMode = .byTruncatingTail
-        label.frame = NSRect(x: 20, y: (Style.drawerRowH - 17) / 2, width: Style.drawerWidth - 36, height: 17)
+        label.frame = NSRect(x: 12, y: (Style.drawerRowH - 17) / 2, width: Style.drawerWidth - 28, height: 17)
         label.autoresizingMask = [.width]
         card.addSubview(label)
         layoutSwipe()
@@ -2310,7 +2337,22 @@ private final class DrawerRow: NSView {
         var hovered = false { didSet { needsDisplay = true } }
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
         override func draw(_ dirtyRect: NSRect) {
-            let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0.5), xRadius: 9, yRadius: 9)
+            // The card reads as a tab off the drawer's left edge: square and
+            // flush on the left, rounded only on the right. The rect starts
+            // past x=0 so the left stroke clips away and the fill runs clean
+            // to the edge.
+            let r = NSRect(x: -2, y: 0.5, width: bounds.width - 8 + 2, height: bounds.height - 1)
+            let path = NSBezierPath()
+            let rad: CGFloat = 9
+            path.move(to: NSPoint(x: r.minX, y: r.minY))
+            path.line(to: NSPoint(x: r.maxX - rad, y: r.minY))
+            path.appendArc(withCenter: NSPoint(x: r.maxX - rad, y: r.minY + rad),
+                           radius: rad, startAngle: -90, endAngle: 0)
+            path.line(to: NSPoint(x: r.maxX, y: r.maxY - rad))
+            path.appendArc(withCenter: NSPoint(x: r.maxX - rad, y: r.maxY - rad),
+                           radius: rad, startAngle: 0, endAngle: 90)
+            path.line(to: NSPoint(x: r.minX, y: r.maxY))
+            path.close()
             (isCurrent ? Style.selectionColor : hovered ? Style.drawerHover : Style.drawerCard).setFill()
             path.fill()
             Style.drawerCardEdge.setStroke()
@@ -2508,7 +2550,7 @@ private final class NoteDrawer: NSView {
             stack.addSubview(m)
             marker = m
         }
-        marker?.frame = NSRect(x: 8, y: y - 1, width: stack.bounds.width - 16, height: 2)
+        marker?.frame = NSRect(x: 0, y: y - 1, width: stack.bounds.width - 8, height: 2)
     }
 
     private func finishDrag(of row: DrawerRow, moved: Bool) {
@@ -2613,8 +2655,6 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     private var applyingCaseFix = false
     // Set when the note is being deleted so windowWillClose skips the save.
     private var discarding = false
-    // Pending hover-to-wake: armed on mouse enter, cancelled on exit.
-    private var hoverWake: DispatchWorkItem?
 
     init(data: NoteData, manager: NotesManager) {
         self.id = data.id
@@ -2631,9 +2671,12 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         let size = Style.defaultSize
         window = GlassWindow(
             contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.borderless, .closable, .resizable, .nonactivatingPanel],
+            styleMask: [.borderless, .closable, .resizable],
             backing: .buffered, defer: false)
-        window.isFloatingPanel = false
+        // Programmatic NSWindows default to releasing themselves on close
+        // while the controller also holds a strong reference; keep ownership
+        // with ARC so closing a note can't over-release the window.
+        window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
         window.isMovableByWindowBackground = true
         window.level = .normal
@@ -2647,6 +2690,14 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             let g = NSGlassEffectView(frame: window.contentLayoutRect)
             g.cornerRadius = Style.cornerRadius
             g.tintColor = Style.idleTint
+            // Max-picked from a side-by-side probe of the glass's hidden
+            // knobs ("L2"): regular frosted style with the private
+            // content-lensing flag at 2 bends light at the edges far harder
+            // than stock glass. responds-guarded so an OS update that drops
+            // the setter degrades to plain glass instead of crashing.
+            if g.responds(to: Selector(("set_contentLensing:"))) {
+                g.setValue(2, forKey: "_contentLensing")
+            }
             // The glass paints a soft shadow/edge around its rounded shape.
             // The window has no shadow of its own, so that spill lands on the
             // window's square surface and reads as a faint hard-cornered block
@@ -2697,20 +2748,20 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
         // font size: two bare chevrons (no bezel), up = bigger, down = smaller
         let up = symbolButton("chevron.up", point: 9, action: #selector(fontUp))
-        up.frame = NSRect(x: 8, y: Style.stripHeight / 2 - 1, width: 15, height: 11)
+        up.frame = NSRect(x: 15, y: Style.stripHeight / 2 - 1, width: 15, height: 11)
         up.autoresizingMask = [.maxXMargin, .minYMargin]
         up.toolTip = "Bigger"
         strip.addSubview(up)
 
         let down = symbolButton("chevron.down", point: 9, action: #selector(fontDown))
-        down.frame = NSRect(x: 8, y: Style.stripHeight / 2 - 10, width: 15, height: 11)
+        down.frame = NSRect(x: 15, y: Style.stripHeight / 2 - 10, width: 15, height: 11)
         down.autoresizingMask = [.maxXMargin, .minYMargin]
         down.toolTip = "Smaller"
         strip.addSubview(down)
 
         // size readout — snug against the chevrons so the stepper reads as one control
         sizeLabel = NSTextField(labelWithString: "\(Style.sizeRank(fontSize))")
-        sizeLabel.frame = NSRect(x: 19, y: (Style.stripHeight - 16) / 2, width: 26, height: 16)
+        sizeLabel.frame = NSRect(x: 26, y: (Style.stripHeight - 16) / 2, width: 26, height: 16)
         sizeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         sizeLabel.textColor = Style.chromeColor
         sizeLabel.autoresizingMask = [.maxXMargin, .minYMargin]
@@ -2819,6 +2870,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         drawerTab.onDragEnd = { [weak self] in self?.saveDrawerWidth() }
         container.addSubview(drawerTab)
 
+
         currentFont = NSFont.systemFont(ofSize: fontSize)
         for blocks in data.resolvedColumns {
             insertColumn(makeColumn(blocks: blocks), at: columns.count)
@@ -2829,37 +2881,25 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         }
         layoutColumns()
 
-        // Focus follows the mouse: resting the cursor on a note for a beat
-        // wakes it — no click needed after visiting another app (becoming key
-        // also restores the text cursor, via restoreCursor). The dwell keeps a
-        // mouse just passing through from yanking the keyboard mid-typing.
-        let wakeZone = HoverZone(frame: container.bounds)
-        wakeZone.autoresizingMask = [.width, .height]
-        wakeZone.onEnter = { [weak self] in
-            guard let self, !self.window.isKeyWindow else { return }
-            let work = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                NSApp.activate(ignoringOtherApps: true)
-                self.window.makeKeyAndOrderFront(nil)
-            }
-            self.hoverWake?.cancel()
-            self.hoverWake = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
-        }
-        wakeZone.onExit = { [weak self] in
-            self?.hoverWake?.cancel()
-            self?.hoverWake = nil
-        }
-        container.addSubview(wakeZone)
-
-        if #available(macOS 26.0, *), let g = glass as? NSGlassEffectView {
-            g.contentView = container
-        } else {
-            container.frame = glass.bounds
-            container.autoresizingMask = [.width, .height]
-            glass.addSubview(container)
-        }
-        window.contentView = glass
+        // The UI must sit BESIDE the glass, never inside it: anything handed
+        // to NSGlassEffectView as contentView becomes part of the pane the
+        // edge lens refracts, so buttons, grips, and colored text near an
+        // edge get bent into ghost smears. Stacked above as a sibling, the
+        // lens bends only the desktop behind the window.
+        container.frame = glass.frame
+        container.autoresizingMask = [.width, .height]
+        // The glass's mask no longer clips the UI, so the container clips
+        // itself to the same rounded shape (keeps the drawer and columns
+        // from overhanging the corners).
+        container.wantsLayer = true
+        container.layer?.cornerRadius = Style.cornerRadius
+        container.layer?.cornerCurve = .continuous
+        container.layer?.masksToBounds = true
+        let root = NSView(frame: window.contentLayoutRect)
+        root.autoresizesSubviews = true
+        root.addSubview(glass)
+        root.addSubview(container)
+        window.contentView = root
         window.delegate = self
 
         // position: restore saved frame (pulled back onto a screen), else center
@@ -3276,7 +3316,14 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             .joined(separator: " · ")
     }
 
-    private func saveDebounced() { store.scheduleSave { [weak self] in self?.snapshot() } }
+    // Empty notes skip the debounced write too — moving or resizing a note
+    // you never typed in shouldn't mint an "Untitled" file.
+    private func saveDebounced() {
+        store.scheduleSave { [weak self] in
+            guard let self, !self.isEmpty else { return nil }
+            return self.snapshot()
+        }
+    }
 
     @objc private func insertSection() {
         // Editing a section title → the new section goes right below that one.
@@ -3835,6 +3882,9 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         if range.length > 0 {
             // resize just the highlighted text in the active block
             tv.textStorage?.addAttribute(.font, value: currentFont, range: range)
+            // Attribute edits skip didChangeText, so re-measure the block here
+            // or the taller text paints over everything stacked below it.
+            tv.invalidateIntrinsicContentSize()
         }
         // and make whatever you type next use this size (the "cursor" case)
         tv.typingAttributes[.font] = currentFont
@@ -4472,10 +4522,6 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
-        // A focused note rides above every other app's windows; losing focus
-        // drops it back into the normal stack so it never squats on top of
-        // whatever you clicked over to.
-        window.level = .floating
         applyTint(focused: true)
         restoreCursor()
     }
@@ -4500,9 +4546,12 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        window.level = .normal
         applyTint(focused: false)
-        store.saveNow(snapshot())
+        // persist(), not an unconditional save: this also fires while the
+        // window is closing, AFTER windowWillClose already deleted an empty
+        // note's file — a plain saveNow here resurrected the file and left
+        // ghost "Untitled" notes in the lists.
+        persist()
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -4519,8 +4568,15 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             manager?.controllerDidClose(self)
             return
         }
-        if isEmpty { store.delete() } else { store.saveNow(snapshot()) }
+        persist()
         manager?.controllerDidClose(self)
+    }
+
+    /// The one rule every save path shares: a note with real content flushes
+    /// to disk, an empty one leaves no file behind (deleting any file it
+    /// wrote earlier).
+    private func persist() {
+        if isEmpty { store.delete() } else { store.saveNow(snapshot()) }
     }
 
     /// Close this note's window without saving — used when the note is being
@@ -4532,7 +4588,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     /// Called on app quit — same rule as closing: an empty note leaves no
     /// file behind, a real one flushes to disk.
-    func flush() { if isEmpty { store.delete() } else { store.saveNow(snapshot()) } }
+    func flush() { persist() }
 }
 
 // MARK: - Manager
@@ -4557,6 +4613,7 @@ final class NotesManager: NSObject, NSMenuDelegate {
 
     func start() {
         setupStatusItem()
+        NoteStore.deleteBlankSaved()    // sweep ghost "Untitled" files first
         NoteStore.mirrorAllSaved()      // bring the Markdown mirror up to date
 
         // Restore only the main note (most recently edited) so a reload opens a
@@ -4688,8 +4745,8 @@ final class NotesManager: NSObject, NSMenuDelegate {
     // MARK: menu-bar switcher
 
     /// Status-item glyph: the app icon boiled down to one line - a rounded
-    /// square outline with a plus in the center. Template image, so it takes
-    /// the menu bar's tint like the system icons.
+    /// square note with three text lines (long, short, long). Template image,
+    /// so it takes the menu bar's tint like the system icons.
     private static func menuBarGlyph() -> NSImage {
         let size = NSSize(width: 18, height: 18)
         let img = NSImage(size: size, flipped: false) { _ in
@@ -4699,13 +4756,13 @@ final class NotesManager: NSObject, NSMenuDelegate {
             outline.lineWidth = 1.4
             NSColor.black.setStroke()
             outline.stroke()
-            let cx = size.width / 2, cy = size.height / 2, arm: CGFloat = 2.8
-            let plus = NSBezierPath()
-            plus.move(to: NSPoint(x: cx - arm, y: cy)); plus.line(to: NSPoint(x: cx + arm, y: cy))
-            plus.move(to: NSPoint(x: cx, y: cy - arm)); plus.line(to: NSPoint(x: cx, y: cy + arm))
-            plus.lineWidth = 1.4
-            plus.lineCapStyle = .round
-            plus.stroke()
+            let lines = NSBezierPath()
+            lines.move(to: NSPoint(x: 5, y: 12.95)); lines.line(to: NSPoint(x: 13, y: 12.95))
+            lines.move(to: NSPoint(x: 5, y: 9));     lines.line(to: NSPoint(x: 10, y: 9))
+            lines.move(to: NSPoint(x: 5, y: 5.05));  lines.line(to: NSPoint(x: 13, y: 5.05))
+            lines.lineWidth = 1.4
+            lines.lineCapStyle = .round
+            lines.stroke()
             return true
         }
         img.isTemplate = true
@@ -4715,6 +4772,12 @@ final class NotesManager: NSObject, NSMenuDelegate {
 
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        // The item only joins the menu bar layout when the app is launched
+        // through LaunchServices (Finder, `open -a`). Exec'ing the raw
+        // Contents/MacOS binary parks the icon off the bar - and keeps doing
+        // so for the rest of the login session, even for later proper
+        // launches - so LaunchAgents and scripts must start the app with
+        // `open -a`, never the bare binary.
         if let button = item.button {
             button.image = Self.menuBarGlyph()
             button.toolTip = "Postit notes"
@@ -4900,6 +4963,17 @@ final class NotesManager: NSObject, NSMenuDelegate {
         return c
     }
 
+    /// Dock click / Cmd-Tab with no windows open: bring back the last note.
+    func reopen() {
+        if let front = controllers.last {
+            front.focus()
+        } else if let main = NoteStore.loadMostRecent() {
+            open(main).focus()
+        } else {
+            newNote()
+        }
+    }
+
     func newNote() {
         var data = NoteData(id: UUID().uuidString)
         // Cascade off the frontmost note so a new one isn't hidden behind it.
@@ -4918,6 +4992,9 @@ final class NotesManager: NSObject, NSMenuDelegate {
         // can be reopened from the switcher. Quit via that menu or Cmd+Q.
     }
 
+    /// Bring the most recent note to the front (Dock click / reopen).
+    func focusFront() { controllers.last?.focus() }
+
     func flushAll() { controllers.forEach { $0.flush() } }
 }
 
@@ -4933,6 +5010,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Cmd+N from the main menu (reaches here via the responder chain).
     @objc func newNote(_ sender: Any?) { notes.newNote() }
+
+    /// Dock / Cmd-Tab back in with no notes open: restore the last one.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // A note buried behind other apps counts as "visible", so raise it —
+        // reopening should always end with a note in front.
+        if flag { notes.focusFront() } else { notes.reopen() }
+        return true
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         notes.flushAll()
@@ -4982,7 +5067,7 @@ private func makeMainMenu() -> NSMenu {
 UserDefaults.standard.set(false, forKey: "NSAutomaticPeriodSubstitutionEnabled")
 
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory)   // no Dock icon, no app-switcher tile
+app.setActivationPolicy(.accessory)   // menu-bar icon only, no Dock tile
 let delegate = AppDelegate()
 app.delegate = delegate
 app.mainMenu = makeMainMenu()

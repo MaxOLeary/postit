@@ -1,10 +1,14 @@
+<p align="center">
+  <img src="Swift/icon/icon-1024.png" width="128" alt="Postit app icon">
+</p>
+
 # Postit
 
 Native macOS post-it notes on real Liquid Glass. One Swift file, zero
 dependencies, no Xcode project - just AppKit and `swiftc`.
 
-Dark glassy notes that float on your desktop and get out of your way: no Dock
-icon, no title bars, just a menu-bar icon and the notes themselves.
+Dark glassy notes, no title bars, no Dock icon. A menu-bar icon lists every
+note; the windows themselves stack with your other apps.
 
 <img src="screenshot.png" alt="A Postit note floating over the desktop, showing colored ink shortcuts and a collapsible section" width="560">
 
@@ -29,8 +33,6 @@ icon, no title bars, just a menu-bar icon and the notes themselves.
   moment; the edge glows, and releasing merges them into one window with
   side-by-side columns. Grab the pill at a column's top-right corner to pull
   it back out into its own note
-- **Hover to wake** - rest the pointer on an idle note and it takes focus with
-  the cursor right where you left it, no clicking back in
 - **Math mode** - type `:math` on a line and the lines below become a live
   calculator: arithmetic, percentages (`100 + 15%`), unit conversions
   (`13lb kg`, `72f to c`), currency (`25 eur in usd`, daily rates), and
