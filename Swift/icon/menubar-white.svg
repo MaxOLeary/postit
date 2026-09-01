@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- App-icon note glyph scaled to fill the canvas (11% margin), pure white, no background -->
+  <g transform="translate(512 512) scale(1.809) translate(-512 -512)"
+     fill="none" stroke="#ffffff" stroke-width="42" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="292" y="292" width="440" height="440" rx="78"/>
+    <path d="M384 388 H640"/>
+    <path d="M384 512 H544"/>
+    <path d="M384 636 H640"/>
+  </g>
+</svg>
