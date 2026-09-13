@@ -36,6 +36,21 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>LSMinimumSystemVersion</key>  <string>11.0</string>
     <key>NSHighResolutionCapable</key> <true/>
     <key>LSUIElement</key>             <true/>
+    <!-- Accept markdown / plain-text files (Finder "Open With…", open -a).
+         Rank Alternate so Postit never becomes the system default for .md. -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key> <string>Markdown or plain text</string>
+            <key>CFBundleTypeRole</key> <string>Viewer</string>
+            <key>LSHandlerRank</key>    <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>net.daringfireball.markdown</string>
+                <string>public.plain-text</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST

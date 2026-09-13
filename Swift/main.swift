@@ -93,7 +93,7 @@ private enum Style {
     // left edge, pushing the body text right. Fixed order, drag rows to move.
     static let drawerWidth:    CGFloat = 140     // default; drag the handle to resize
     static let drawerMinWidth: CGFloat = 100
-    static let drawerGap:      CGFloat = 10      // between the drawer and the body
+    static let drawerGap:      CGFloat = 14      // between the drawer and the body; the handle lives here
     static let drawerInsetTop: CGFloat = 8       // below the toolbar strip
     static let drawerInsetBot: CGFloat = cornerRadius + 2   // clear of the corner curve
     static let drawerRadius:   CGFloat = 18
@@ -101,6 +101,10 @@ private enum Style {
     static let drawerRowH:     CGFloat = 34
     static let drawerRowGap:   CGFloat = 6
     static let drawerTint      = NSColor(calibratedWhite: 0.85, alpha: 0.10)
+    // Drawer handle: a whisper at rest, a bit clearer on hover so you can
+    // still find it. withAlphaComponent replaces chromeColor's own alpha.
+    static let drawerTabIdle:  CGFloat = 0.113
+    static let drawerTabHot:   CGFloat = 0.27
     static let drawerCard      = NSColor(calibratedWhite: 1.0, alpha: 0.07)
     static let drawerCardEdge  = NSColor(calibratedWhite: 1.0, alpha: 0.10)
     static let drawerHover     = NSColor(calibratedWhite: 1.0, alpha: 0.14)
@@ -213,6 +217,12 @@ private final class HoverZone: NSView {
 
     override func mouseEntered(with event: NSEvent) { onEnter?() }
     override func mouseExited(with event: NSEvent)  { onExit?() }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// Status text that never eats clicks — window-drag and the body underneath
+/// keep working while a copy confirmation is showing.
+private final class ClickThroughLabel: NSTextField {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
@@ -2194,7 +2204,7 @@ private final class DrawerTab: NSView {
         guard drawsBar else { return }
         let w: CGFloat = 4, h: CGFloat = 112
         let bar = NSRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
-        Style.chromeColor.withAlphaComponent(hot ? 0.7 : 0.35).setFill()
+        Style.chromeColor.withAlphaComponent(hot ? Style.drawerTabHot : Style.drawerTabIdle).setFill()
         NSBezierPath(roundedRect: bar, xRadius: w / 2, yRadius: w / 2).fill()
     }
 }
@@ -2585,6 +2595,8 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     // itself via tintColor).
     private weak var fallbackTint: NSView?
     private var sizeLabel: NSTextField!
+    private var copyToast: ClickThroughLabel!
+    private var copyToastHide: DispatchWorkItem?
     private var container: NSView!
     // The note body: one or more side-by-side columns, each a scroll view over
     // a vertical stack of block views (GrowingTextView for freeform text,
@@ -2870,6 +2882,19 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         drawerTab.onDragEnd = { [weak self] in self?.saveDrawerWidth() }
         container.addSubview(drawerTab)
 
+        // Copy confirmation: sits in the bottom padding, math-green, fades
+        // out on its own. Click-through so it never steals a window drag.
+        copyToast = ClickThroughLabel(labelWithString: "")
+        copyToast.frame = NSRect(x: Style.padding, y: 2,
+                                 width: container.bounds.width - Style.padding * 2, height: 13)
+        copyToast.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+        copyToast.textColor = Style.mathResultColor
+        copyToast.alignment = .center
+        copyToast.autoresizingMask = [.width, .maxYMargin]
+        copyToast.wantsLayer = true
+        copyToast.alphaValue = 0
+        copyToast.isHidden = true
+        container.addSubview(copyToast)
 
         currentFont = NSFont.systemFont(ofSize: fontSize)
         for blocks in data.resolvedColumns {
@@ -2926,7 +2951,10 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             name: NSTextView.didChangeSelectionNotification, object: nil)
     }
 
-    deinit { NotificationCenter.default.removeObserver(self) }
+    deinit {
+        copyToastHide?.cancel()
+        NotificationCenter.default.removeObserver(self)
+    }
 
     /// Pull a saved frame back onto a screen, so a note can never restore to a
     /// spot you can't reach (a display that's gone, or a frame that a buggy
@@ -2952,6 +2980,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
               let field = fe.delegate as? NSTextField,
               let section = allBlockViews.compactMap({ $0 as? SectionView })
                   .first(where: { $0.ownsTitleField(field) }) else { return }
+        copySelectionIfChosen(fe)
         activeTitleSection = section
         sizeLabel.stringValue = "\(Style.sizeRank(section.titleFontSize))"
         // Ink follows the cursor into headers too: landing in a colored title
@@ -3931,6 +3960,12 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
                       width: cw - x - Style.padding, height: columnsHost.frame.height)
     }
 
+    /// Where the handle sits: in the note's left padding while the drawer is
+    /// closed, centered in the gap just outside the drawer's edge while open.
+    private func tabX(open: Bool) -> CGFloat {
+        open ? drawerWidth + (Style.drawerGap - drawerTab.frame.width) / 2 : 2
+    }
+
     /// Drag on the handle or the drawer's edge: widen/narrow, live, keeping
     /// the body at least a column wide.
     private func resizeDrawer(by dx: CGFloat) {
@@ -3939,7 +3974,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         guard w != drawerWidth else { return }
         drawerWidth = w
         drawer.frame = NSRect(x: 0, y: drawer.frame.minY, width: w, height: drawer.frame.height)
-        drawerTab.setFrameOrigin(NSPoint(x: w - 12, y: drawerTab.frame.minY))
+        drawerTab.setFrameOrigin(NSPoint(x: tabX(open: true), y: drawerTab.frame.minY))
         columnsHost.frame = bodyFrame(open: true)
     }
 
@@ -3969,13 +4004,13 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         }
         let body = bodyFrame(open: open)
         let drawerX: CGFloat = open ? 0 : -drawerWidth
-        let tabX: CGFloat = open ? drawerWidth - 12 : 2
+        let handleX = tabX(open: open)
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.24
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             ctx.allowsImplicitAnimation = true
             drawer.animator().setFrameOrigin(NSPoint(x: drawerX, y: drawer.frame.minY))
-            drawerTab.animator().setFrameOrigin(NSPoint(x: tabX, y: drawerTab.frame.minY))
+            drawerTab.animator().setFrameOrigin(NSPoint(x: handleX, y: drawerTab.frame.minY))
             columnsHost.animator().frame = body
         }, completionHandler: { [weak self] in
             guard let self, !self.drawerOpen else { return }
@@ -4467,10 +4502,56 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         window.makeFirstResponder(tv)
     }
 
+    /// Selecting text copies it, TUI-style — no Cmd+C. Empty selections
+    /// (just parking the caret) leave the clipboard alone so a click doesn't
+    /// wipe whatever you copied last. A title-field's click-to-focus
+    /// select-all is ignored for the same reason.
+    ///
+    /// NSTextView drag-selects inside mouseDown's tracking loop, so
+    /// currentEvent stays .leftMouseDown the whole time — don't filter
+    /// on dragged/up or this never fires.
+    private func copySelectionIfChosen(_ tv: NSTextView) {
+        let sel = tv.selectedRange()
+        guard sel.length > 0 else { return }
+        if tv.isFieldEditor,
+           sel.location == 0, sel.length == (tv.string as NSString).length,
+           let e = NSApp.currentEvent,
+           e.clickCount == 1,
+           e.type == .leftMouseDown || e.type == .leftMouseUp {
+            return
+        }
+        tv.copy(nil)
+        let n = (tv.string as NSString).substring(with: sel).count
+        showCopyToast(chars: n)
+    }
+
+    /// Green readout at the bottom of the note. Stays put while the selection
+    /// is still growing, then fades after a beat so it doesn't sit there.
+    private func showCopyToast(chars: Int) {
+        let unit = chars == 1 ? "char" : "chars"
+        copyToast.stringValue = "\(chars) \(unit) copied to clipboard"
+        copyToast.isHidden = false
+        copyToast.alphaValue = 1
+        copyToastHide?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.35
+                self.copyToast.animator().alphaValue = 0
+            }, completionHandler: { [weak self] in
+                guard let self, self.copyToast.alphaValue == 0 else { return }
+                self.copyToast.isHidden = true
+            })
+        }
+        copyToastHide = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: work)
+    }
+
     /// Track which block is active and the size at its cursor/selection so
     /// `currentFont`, the stepper, and the readout follow what you're editing.
     func textViewDidChangeSelection(_ notification: Notification) {
         guard let tv = notification.object as? NSTextView else { return }
+        copySelectionIfChosen(tv)
         activeText = tv
         activeTitleSection = nil    // cursor is back in a body block
         let sel = tv.selectedRange()
@@ -4986,6 +5067,23 @@ final class NotesManager: NSObject, NSMenuDelegate {
         controllers.forEach { $0.refreshDrawer() }   // it lists once it has text
     }
 
+    /// A note created from a file handed to the app (Finder "Open With…" or
+    /// `open -a Postit note.md` — Debrief sends meeting notes through here).
+    /// Plain text body; the block model styles it like typed text.
+    func newNote(fromFileText text: String) {
+        var data = NoteData(id: UUID().uuidString,
+                            text: text,
+                            blocks: [Block(kind: .text, text: text)])
+        if let front = controllers.last {
+            let f = front.windowRef.frame
+            data.frame = [f.origin.x + 26, f.origin.y - 26, f.size.width, f.size.height]
+        }
+        let c = open(data)
+        c.flush()                               // its file exists on disk right away
+        c.windowRef.makeKeyAndOrderFront(nil)
+        controllers.forEach { $0.refreshDrawer() }
+    }
+
     func controllerDidClose(_ c: NoteController) {
         controllers.removeAll { $0 === c }
         // No terminate on empty: the app lives in the menu bar so a closed note
@@ -5010,6 +5108,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Cmd+N from the main menu (reaches here via the responder chain).
     @objc func newNote(_ sender: Any?) { notes.newNote() }
+
+    /// Files handed to the app (Finder "Open With…", `open -a Postit x.md`):
+    /// each becomes a new note holding the file's text.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            notes.newNote(fromFileText: text)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     /// Dock / Cmd-Tab back in with no notes open: restore the last one.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
