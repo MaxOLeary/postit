@@ -13,9 +13,20 @@ Post-it notes for the Mac. Translucent glass notes that sit on your desktop.
 
 1. Open the downloaded ZIP.
 2. Drag **Postit** into your **Applications** folder and open it.
-3. The first time, macOS will warn that the app is from an unidentified
-   developer. Right-click the app, choose **Open**, then click **Open** again.
-   This only happens once.
+
+<!-- remove after notarization -->
+The first open shows a warning: "Apple could not verify Postit is free of
+malware". Click **Done**. Never click **Move to Trash**. Then:
+
+1. Open **System Settings**, then **Privacy & Security**.
+2. Scroll down to the **Security** section. Click **Open Anyway** next to
+   the line about Postit.
+3. Confirm with Touch ID or your password, then open Postit again.
+
+That is it, once. Postit is signed with an in-house certificate, not yet
+an Apple one, so macOS can see who signed it but cannot check it against
+Apple's list. (Right-clicking the app and choosing Open does not work on
+macOS 15 or later, so skip that trick.)
 
 Postit lives in the menu bar at the top of the screen. There is no Dock icon.
 
@@ -38,6 +49,13 @@ a simpler blur.
 - Every note has a drawer on its left edge listing all your notes; the menu
   bar icon lists them too.
 
+## Meetings
+
+Install [Whisper](https://github.com/MaxOLeary/whisper) too (Apple Silicon,
+macOS 14 or later) and a speech bubble appears in Postit's toolbar and menu.
+Click it to record a meeting. When you stop, the notes and the transcript land
+as a new sticky. Without Whisper the bubble stays hidden.
+
 ## Shortcuts
 
 | Shortcut | Action |
@@ -58,8 +76,11 @@ The entire app is one Swift file, `Swift/main.swift`. It builds with `swiftc`
 alone; there is no Xcode project and there are no dependencies.
 
 ```bash
-cd Swift && ./build.sh
+cd Swift && ./build.sh          # builds, signs, installs /Applications/Postit.app
+cd Swift && ./build.sh --ship   # also verifies, refreshes the committed Postit.app, uploads the release
 ```
+
+`--ship` needs the signing cert on this Mac.
 
 Notes are stored one JSON file each in
 `~/Library/Application Support/Postit/notes/`. To also keep a plain Markdown
