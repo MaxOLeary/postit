@@ -5,9 +5,11 @@
 // (Obsidian-style folds) inserted at the cursor from the toolbar's ▸ chevron.
 // Select a fold's title and drag it and the whole fold moves with it, landing
 // wherever the line shows — between blocks or mid-paragraph, which splits the
-// text around it. Drag anywhere to move, grab an edge/corner to resize. The top strip gives you
-// a "+" to spawn another note, a font stepper with a live size readout, the ▸
-// add-section button, and a list-bullet switcher. Typing shortcuts: double-tap
+// text around it. Drag anywhere to move, grab an edge/corner to resize. The top
+// strip, left to right: "+" to spawn another note, the ▸ add-section button,
+// the ink ring (hover it and the swatches drop down in a thin glass column),
+// and a size button whose readout follows the cursor and whose hover drops a
+// menu of every size; on the right, the meeting bubble and ✕. Typing shortcuts: double-tap
 // a capital trigger (RR / GG / BB for ink, WW for white, ## for a section) and
 // both characters vanish, replaced by the action; Shift+↑/↓ steps the font
 // size at the cursor. A line reading ":math" turns the lines below it into a
@@ -112,6 +114,24 @@ private enum Style {
     // out from under it (Mail-style); tap it to delete, swipe back to cancel.
     static let drawerSwipeW:   CGFloat = 52
     static let drawerDeleteRed = NSColor(calibratedRed: 0.839, green: 0.220, blue: 0.173, alpha: 0.95)
+    // Hanging panels: the size menu and the ink swatches each drop out of the
+    // toolbar strip in a thin glass column — straight top edge glued to the
+    // tab that opened them (size button / ink tab), rounded bottom corners,
+    // the drawer's tint and shadow. The tab is shorter than the strip, so the
+    // panel overlaps the strip's bottom padding and there is no gap.
+    static let panelRadius:    CGFloat = 12
+    static let tabHeight:      CGFloat = 22
+    static let tabRadius:      CGFloat = 6
+    static let panelAttach:    CGFloat = (stripHeight - tabHeight) / 2
+    // Extra pixel so the glass tucks under the tab and kills the hairline.
+    static let panelTuck:      CGFloat = 1
+    static let sizeMenuWidth:  CGFloat = 34
+    static let sizeRowHeight:  CGFloat = 18
+    static let sizeMenuVisible: Int = 10   // ranks on screen; the rest scroll
+    static let inkPanelWidth:  CGFloat = 24
+    static let inkDotGap:      CGFloat = 6
+    static let panelHover      = NSColor(calibratedWhite: 1.0, alpha: 0.14)
+    static let panelEdge       = NSColor(calibratedWhite: 1.0, alpha: 0.18)
     static let idleTint       = NSColor(calibratedWhite: 0.16, alpha: 0.18)
     static let focusedTint    = NSColor(calibratedWhite: 0.85, alpha: 0.12)
     // Ink swatches — red, green, blue, the green matching the color :math
@@ -220,6 +240,12 @@ private final class HoverZone: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
+/// Empty view that never eats clicks — holds the hanging-panel outline.
+private final class ClickThroughView: NSView {
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 /// Status text that never eats clicks — window-drag and the body underneath
 /// keep working while a copy confirmation is showing.
 private final class ClickThroughLabel: NSTextField {
@@ -240,6 +266,50 @@ private func bareButton(frame: NSRect = .zero,
     return b
 }
 
+/// Debrief's 16×16 pixel speech bubble, centered in `size` (18 for the menu
+/// bar; the note chrome draws it at 14 with `pixel` = 14/16 so the art fills
+/// the smaller box). Template so it takes the chrome / menu-bar tint.
+private func speechBubbleImage(size: CGFloat = 18, pixel: CGFloat = 1) -> NSImage {
+    let rows = [
+        "..############..",
+        ".#............#.",
+        "#..............#",
+        "#..###########.#",
+        "#..............#",
+        "#..######......#",
+        "#..............#",
+        "#..#########...#",
+        "#..............#",
+        "#..............#",
+        ".#............#.",
+        "..###...######..",
+        "....#..#........",
+        "....#.#.........",
+        "....##..........",
+        "....#..........."
+    ]
+    let img = NSImage(size: NSSize(width: size, height: size), flipped: false) { _ in
+        NSGraphicsContext.current?.shouldAntialias = false
+        NSGraphicsContext.current?.imageInterpolation = .none
+        NSColor.black.setFill()
+        let origin = (size - 16 * pixel) / 2
+        for (row, line) in rows.enumerated() {
+            for (col, ch) in line.enumerated() where ch == "#" {
+                let x = origin + CGFloat(col) * pixel
+                let y = origin + CGFloat(15 - row) * pixel
+                NSRect(x: x, y: y, width: pixel, height: pixel).fill()
+            }
+        }
+        return true
+    }
+    img.isTemplate = true
+    return img
+}
+
+private func whisperAppExists() -> Bool {
+    FileManager.default.fileExists(atPath: "/Applications/Whisper.app")
+}
+
 /// A borderless, glyph-only button in the chrome tint — the shared look for
 /// every toolbar/section symbol button (+ chevrons, switcher, disclosure, ✕).
 private func chromeSymbolButton(_ symbol: String, point: CGFloat,
@@ -251,6 +321,314 @@ private func chromeSymbolButton(_ symbol: String, point: CGFloat,
     b.image = symbolImage(symbol, point: point)
     b.contentTintColor = Style.chromeColor
     return b
+}
+
+/// Combined outline of a hanging panel: 6pt on the tab, 12pt on the body.
+private func hangingPath(in rect: CGRect) -> CGPath {
+    let t = min(Style.tabRadius, rect.width / 2, rect.height / 2)
+    let b = min(Style.panelRadius, rect.width / 2, rect.height / 2)
+    let p = CGMutablePath()
+    p.move(to: CGPoint(x: rect.minX + b, y: rect.minY))
+    p.addLine(to: CGPoint(x: rect.maxX - b, y: rect.minY))
+    p.addArc(center: CGPoint(x: rect.maxX - b, y: rect.minY + b),
+             radius: b, startAngle: .pi * 1.5, endAngle: 0, clockwise: false)
+    p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - t))
+    p.addArc(center: CGPoint(x: rect.maxX - t, y: rect.maxY - t),
+             radius: t, startAngle: 0, endAngle: .pi / 2, clockwise: false)
+    p.addLine(to: CGPoint(x: rect.minX + t, y: rect.maxY))
+    p.addArc(center: CGPoint(x: rect.minX + t, y: rect.maxY - t),
+             radius: t, startAngle: .pi / 2, endAngle: .pi, clockwise: false)
+    p.addLine(to: CGPoint(x: rect.minX, y: rect.minY + b))
+    p.addArc(center: CGPoint(x: rect.minX + b, y: rect.minY + b),
+             radius: b, startAngle: .pi, endAngle: .pi * 1.5, clockwise: false)
+    p.closeSubpath()
+    return p
+}
+
+/// A thin glass column hanging off a toolbar tab — the size menu and the ink
+/// swatches each live in one. The view grows upward over the tab so one glass
+/// shape (and one white outline) wraps tab + body. `frame` is the body;
+/// `content` is that body. The path mask lives only on the glass, never on
+/// `content` — a layer mask on an NSScrollView ancestor kills scrolling.
+private final class HangingPanel: NSView {
+    let content = NSView()
+    let bodyHeight: CGFloat
+    private let glassHost = ClickThroughView()
+    private let glassMask = CAShapeLayer()
+    private let rim = ClickThroughView()
+    private let stroke = CAShapeLayer()
+    private var glass: NSView?
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    init(frame: NSRect, tabHeight: CGFloat = Style.tabHeight) {
+        self.bodyHeight = frame.height
+        var full = frame
+        full.size.height += tabHeight - Style.panelTuck
+        super.init(frame: full)
+        wantsLayer = true
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.35
+        layer?.shadowRadius = 12
+        layer?.shadowOffset = CGSize(width: 0, height: -4)
+        layer?.masksToBounds = false
+
+        glassHost.wantsLayer = true
+        glassHost.layer?.mask = glassMask
+        addSubview(glassHost)
+
+        let backing: NSView
+        if #available(macOS 26.0, *) {
+            let g = NSGlassEffectView(frame: .zero)
+            g.cornerRadius = 0
+            g.tintColor = Style.drawerTint
+            backing = g
+        } else {
+            let v = NSVisualEffectView(frame: .zero)
+            v.material = .hudWindow
+            v.blendingMode = .behindWindow
+            v.state = .active
+            let tint = NSView(frame: v.bounds)
+            tint.autoresizingMask = [.width, .height]
+            tint.wantsLayer = true
+            tint.layer?.backgroundColor = Style.drawerTint.cgColor
+            v.addSubview(tint)
+            backing = v
+        }
+        glassHost.addSubview(backing)
+        glass = backing
+
+        // Body only, sized now so dots/rows added next land in a real frame
+        // (a 0-size content + minYMargin autoresizing yeets them into the tab).
+        content.frame = NSRect(x: 0, y: 0, width: full.width, height: bodyHeight)
+        content.autoresizingMask = [.width, .maxYMargin]
+        content.wantsLayer = true
+        content.layer?.cornerRadius = Style.panelRadius
+        content.layer?.cornerCurve = .continuous
+        content.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        content.layer?.masksToBounds = true
+        addSubview(content)
+
+        rim.wantsLayer = true
+        stroke.fillColor = nil
+        stroke.strokeColor = Style.panelEdge.cgColor
+        stroke.lineWidth = 1
+        stroke.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        rim.layer?.addSublayer(stroke)
+        addSubview(rim)
+    }
+    required init?(coder: NSCoder) { fatalError("unused") }
+
+    override func layout() {
+        super.layout()
+        glassHost.frame = bounds
+        rim.frame = bounds
+        content.frame = NSRect(x: 0, y: 0, width: bounds.width, height: bodyHeight)
+        glass?.frame = bounds.insetBy(dx: -2, dy: -2)
+        let local = CGRect(origin: .zero, size: bounds.size)
+        let path = hangingPath(in: local)
+        glassMask.frame = local
+        glassMask.path = path
+        stroke.frame = local
+        stroke.path = path
+        layer?.shadowPath = path
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // `point` is in the superview (same as SizeButton / SizeRow).
+        guard frame.contains(point) else { return nil }
+        let local = convert(point, from: superview)
+        if local.y >= bodyHeight - Style.panelTuck { return nil }
+        if let hit = content.hitTest(local) { return hit }
+        return content
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        // Never let a wheel event fall through to the note's column scroller.
+        guard let scroll = content.subviews.compactMap({ $0 as? NSScrollView }).first else { return }
+        let saved = scroll.nextResponder
+        scroll.nextResponder = nil
+        scroll.scrollWheel(with: event)
+        scroll.nextResponder = saved
+    }
+}
+
+/// The font-size control: two stacked chevrons and the rank readout acting as
+/// ONE button. Hovering lights a pill and opens the size menu (same as the
+/// ink ring). The chevrons are a picture of "size", not steppers — stepping is
+/// Shift+↑/↓ and the app menu.
+private final class SizeButton: NSView {
+    var onHover: (() -> Void)?
+    let label = NSTextField(labelWithString: "")
+    private let up = NSImageView()
+    private let down = NSImageView()
+    private var hot = false { didSet { repaint() } }
+    var isOpen = false { didSet { repaint() } }
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.isOpaque = false
+        layer?.cornerRadius = Style.tabRadius
+        layer?.cornerCurve = .continuous
+        for (v, name, y) in [(up, "chevron.up", frame.height - 10), (down, "chevron.down", 3)] {
+            v.frame = NSRect(x: 3, y: y, width: 11, height: 7)
+            v.image = symbolImage(name, point: 8)
+            v.imageScaling = .scaleProportionallyDown
+            v.contentTintColor = Style.chromeColor
+            addSubview(v)
+        }
+        label.frame = NSRect(x: 15, y: (frame.height - 16) / 2, width: frame.width - 18, height: 16)
+        label.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        label.textColor = Style.chromeColor
+        label.alignment = .center
+        addSubview(label)
+        toolTip = "Text size"
+    }
+    required init?(coder: NSCoder) { fatalError("unused") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.mouseEnteredAndExited, .activeAlways],
+                                       owner: self, userInfo: nil))
+    }
+    override func mouseEntered(with event: NSEvent) { hot = true; onHover?() }
+    override func mouseExited(with event: NSEvent)  { hot = false }
+    // The whole pill is the target; the chevrons and label never eat the click.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        frame.contains(point) ? self : nil
+    }
+
+    private func repaint() {
+        // Open: clear, so the hanging panel's glass shows through as one piece.
+        let fill: NSColor? = isOpen ? nil
+            : hot ? NSColor(calibratedWhite: 1, alpha: 0.10)
+            : nil
+        layer?.backgroundColor = fill?.cgColor
+        layer?.isOpaque = false
+        layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner,
+                                .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+        let tint = (hot || isOpen) ? NSColor(calibratedWhite: 1, alpha: 0.85) : Style.chromeColor
+        up.contentTintColor = tint
+        down.contentTintColor = tint
+        label.textColor = tint
+    }
+}
+
+/// Highlight behind the ink ring. When the swatch column is open it lights
+/// the same way as the size button, so ring + column read as one piece.
+private final class InkTab: NSView {
+    var isOpen = false { didSet { repaint() } }
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        // No layer: a clear layer-backed view still composites opaque and
+        // hides the glass tab sitting behind the strip.
+    }
+    required init?(coder: NSCoder) { fatalError("unused") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    private func repaint() {}
+}
+
+/// One row of the size menu: a rank number, hover highlight, the selection
+/// blue when it's the current size.
+private final class SizeRow: NSView {
+    var onTap: (() -> Void)?
+    let rank: Int
+    var isCurrent = false { didSet { repaint() } }
+    private var hot = false { didSet { repaint() } }
+    private let label: NSTextField
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    init(rank: Int, width: CGFloat) {
+        self.rank = rank
+        label = NSTextField(labelWithString: "\(rank)")
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: Style.sizeRowHeight))
+        wantsLayer = true
+        layer?.cornerRadius = 5
+        layer?.cornerCurve = .continuous
+        label.frame = NSRect(x: 0, y: 1, width: width, height: 16)
+        label.autoresizingMask = [.width]
+        label.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        label.alignment = .center
+        addSubview(label)
+        repaint()
+    }
+    required init?(coder: NSCoder) { fatalError("unused") }
+
+    func setHot(_ on: Bool) { if hot != on { hot = on } }
+    override func mouseDown(with event: NSEvent) { onTap?() }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        frame.contains(point) ? self : nil
+    }
+
+    private func repaint() {
+        layer?.backgroundColor = isCurrent ? Style.selectionColor.cgColor
+            : hot ? Style.panelHover.cgColor : NSColor.clear.cgColor
+        label.textColor = isCurrent ? .white : NSColor(calibratedWhite: 1, alpha: 0.85)
+    }
+}
+
+/// One tracking area for the whole size list. Per-row enter/exit misses when
+/// the list scrolls under a still cursor, so every row the pointer passed
+/// stays lit. This picks the row under the cursor on move and on scroll.
+private final class SizeListTracker: NSView {
+    var rows: [SizeRow] = []
+    private var boundsObs: NSObjectProtocol?
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    deinit {
+        if let boundsObs { NotificationCenter.default.removeObserver(boundsObs) }
+    }
+
+    func attach(to scroll: NSScrollView) {
+        if let boundsObs { NotificationCenter.default.removeObserver(boundsObs) }
+        scroll.contentView.postsBoundsChangedNotifications = true
+        boundsObs = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scroll.contentView,
+            queue: .main
+        ) { [weak self] _ in self?.refreshFromCursor() }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+
+    override func mouseMoved(with event: NSEvent) { pick(at: event.locationInWindow) }
+    override func mouseEntered(with event: NSEvent) { pick(at: event.locationInWindow) }
+    override func mouseExited(with event: NSEvent) { clear() }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func refreshFromCursor() {
+        guard let window else { clear(); return }
+        pick(at: window.mouseLocationOutsideOfEventStream)
+    }
+
+    private func pick(at windowPoint: NSPoint) {
+        var hit: SizeRow?
+        for r in rows {
+            let p = r.convert(windowPoint, from: nil)
+            if r.bounds.contains(p) { hit = r; break }
+        }
+        for r in rows { r.setHot(r === hit) }
+    }
+
+    private func clear() { rows.forEach { $0.setHot(false) } }
 }
 
 // MARK: - Model
@@ -325,6 +703,113 @@ struct NoteData: Codable {
         let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty { return "Untitled note" }
         return trimmed.count > 40 ? String(trimmed.prefix(40)) + "…" : trimmed
+    }
+}
+
+/// Turns a markdown/plain file (Finder Open With, `open -a Postit file.md`)
+/// into a note: YAML front matter dropped, first ATX h1 is the switcher title,
+/// ATX h2s become sections (Transcript starts collapsed). No headings → one
+/// text block of the original contents, so a plain .txt still opens as-is.
+enum MarkdownImport {
+    struct Result {
+        var title: String
+        var blocks: [Block]
+    }
+
+    static func parse(_ raw: String) -> Result {
+        let source = raw.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = stripYAML(source)
+
+        var h1: String? = nil
+        var sawH2 = false
+        var preamble: [String] = []
+        var sections: [(title: String, lines: [String])] = []
+        var current: [String] = []
+        var sectionTitle: String? = nil
+
+        func flushChunk() {
+            if let title = sectionTitle {
+                sections.append((title, current))
+            } else {
+                preamble.append(contentsOf: current)
+            }
+            current = []
+        }
+
+        for line in lines {
+            if isRule(line) { continue }
+            if h1 == nil, let title = atx(line, level: 1) {
+                h1 = title
+                continue
+            }
+            if let title = atx(line, level: 2) {
+                sawH2 = true
+                flushChunk()
+                sectionTitle = title
+                continue
+            }
+            current.append(line)
+        }
+        flushChunk()
+
+        if h1 == nil && !sawH2 {
+            return Result(title: raw, blocks: [Block(kind: .text, text: raw)])
+        }
+
+        var blocks: [Block] = []
+        // Switcher titles from the first block (currentSummary); flush()
+        // overwrites NoteData.text. Put the h1 text (no "# ") in the lead
+        // text block so the switcher stays "Meeting — …".
+        var lead = joined(preamble)
+        if let h1 {
+            lead = lead.isEmpty ? h1 : h1 + "\n\n" + lead
+        }
+        if !lead.isEmpty {
+            blocks.append(Block(kind: .text, text: lead))
+        }
+        for section in sections {
+            let collapsed = section.title.lowercased() == "transcript"
+            blocks.append(Block(kind: .section, text: joined(section.lines),
+                                title: section.title, collapsed: collapsed))
+        }
+        if blocks.isEmpty {
+            blocks = [Block(kind: .text, text: raw)]
+        }
+        return Result(title: h1 ?? sections.first?.title ?? raw, blocks: blocks)
+    }
+
+    /// Drop a leading YAML fence: first line `---`, through the next line that
+    /// is only `---`, plus the following blank line. Unclosed fence is left.
+    private static func stripYAML(_ source: String) -> [String] {
+        let lines = source.split(omittingEmptySubsequences: false,
+                                 whereSeparator: \.isNewline).map(String.init)
+        guard lines.first.map(isRule) == true else { return lines }
+        guard let close = lines.dropFirst().firstIndex(where: isRule) else { return lines }
+        var rest = Array(lines[(close + 1)...])
+        if rest.first.map({ $0.trimmingCharacters(in: .whitespaces).isEmpty }) == true {
+            rest.removeFirst()
+        }
+        return rest
+    }
+
+    private static func isRule(_ line: String) -> Bool {
+        line.trimmingCharacters(in: .whitespaces) == "---"
+    }
+
+    /// ATX heading at `level` (`# ` / `## `) at line start. Rejects deeper
+    /// headings so `###` is not an h2.
+    private static func atx(_ line: String, level: Int) -> String? {
+        let marks = String(repeating: "#", count: level)
+        guard line.hasPrefix(marks + " "), !line.hasPrefix(marks + "#") else { return nil }
+        return String(line.dropFirst(level + 1)).trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func joined(_ lines: [String]) -> String {
+        var a = lines
+        while a.first?.trimmingCharacters(in: .whitespaces).isEmpty == true { a.removeFirst() }
+        while a.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { a.removeLast() }
+        return a.joined(separator: "\n")
     }
 }
 
@@ -2647,6 +3132,19 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     // The hollow ring the swatches slide out from; its center fills with the
     // active ink so the chosen color stays visible while the tray is closed.
     private var inkRing: NSButton!
+    // Pill behind the ring; lights when the column is open, same as SizeButton.
+    private var inkTab: InkTab!
+    // The swatches' glass column under the ring, and the size button's menu.
+    private var inkPanel: HangingPanel!
+    private var sizeButton: SizeButton!
+    private var sizeMenu: HangingPanel?
+    private var sizeRows: [SizeRow] = []
+    private var sizeScroll: NSScrollView?
+    private var sizeMenuOpen = false
+    private var sizeMenuMonitor: Any?
+    private var sizeZone: HoverZone!
+    private var strip: NSView!
+    private var meetingButton: NSButton?
     private var inkTrayExpanded = false
     // The last single trigger character typed, so a second tap of the same one
     // can fire its double-tap shortcut (RR/GG/BB/WW ink, ## section). When the
@@ -2743,58 +3241,42 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         container.autoresizingMask = [.width, .height]
 
         // ---- top strip (controls float above the text) ----
-        let strip = NSView(frame: NSRect(x: 0, y: container.bounds.height - Style.stripHeight,
-                                         width: container.bounds.width, height: Style.stripHeight))
+        strip = NSView(frame: NSRect(x: 0, y: container.bounds.height - Style.stripHeight,
+                                     width: container.bounds.width, height: Style.stripHeight))
         strip.autoresizingMask = [.width, .minYMargin]
 
-        // "+" new note, top-right beside the close button (the drawer's
-        // handle on the left edge is the note list now)
+        // Left to right: "+" new note, ▸ section, ink ring, size button.
         let plus = chromeButton("+", size: 20, fontSize: 18)
-        plus.frame = NSRect(x: strip.bounds.width - 52, y: (Style.stripHeight - 20) / 2,
-                            width: 20, height: 20)
-        plus.autoresizingMask = [.minXMargin, .minYMargin]
+        plus.frame = NSRect(x: 12, y: (Style.stripHeight - 20) / 2, width: 20, height: 20)
+        plus.autoresizingMask = [.maxXMargin, .minYMargin]
         plus.target = self
         plus.action = #selector(newNote)
         plus.toolTip = "New note"
         strip.addSubview(plus)
 
-        // font size: two bare chevrons (no bezel), up = bigger, down = smaller
-        let up = symbolButton("chevron.up", point: 9, action: #selector(fontUp))
-        up.frame = NSRect(x: 15, y: Style.stripHeight / 2 - 1, width: 15, height: 11)
-        up.autoresizingMask = [.maxXMargin, .minYMargin]
-        up.toolTip = "Bigger"
-        strip.addSubview(up)
-
-        let down = symbolButton("chevron.down", point: 9, action: #selector(fontDown))
-        down.frame = NSRect(x: 15, y: Style.stripHeight / 2 - 10, width: 15, height: 11)
-        down.autoresizingMask = [.maxXMargin, .minYMargin]
-        down.toolTip = "Smaller"
-        strip.addSubview(down)
-
-        // size readout — snug against the chevrons so the stepper reads as one control
-        sizeLabel = NSTextField(labelWithString: "\(Style.sizeRank(fontSize))")
-        sizeLabel.frame = NSRect(x: 26, y: (Style.stripHeight - 16) / 2, width: 26, height: 16)
-        sizeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-        sizeLabel.textColor = Style.chromeColor
-        sizeLabel.autoresizingMask = [.maxXMargin, .minYMargin]
-        sizeLabel.toolTip = "Current font size"
-        strip.addSubview(sizeLabel)
-
         // insert-section — a right-facing chevron that splits the text at the
         // cursor and drops a collapsible section (title + foldable body) there.
         let sectionBtn = symbolButton("chevron.right", point: 12,
                                       action: #selector(insertSection as () -> Void))
-        sectionBtn.frame = NSRect(x: 40, y: (Style.stripHeight - 16) / 2, width: 16, height: 16)
+        sectionBtn.frame = NSRect(x: 38, y: (Style.stripHeight - 16) / 2, width: 16, height: 16)
         sectionBtn.autoresizingMask = [.maxXMargin, .minYMargin]
         sectionBtn.toolTip = "Add a collapsible section at the cursor"
         strip.addSubview(sectionBtn)
 
-        // ink tray — a hollow ring; hover it and the three primary swatches
-        // slide out to its right, tucking back in when the mouse leaves. Click
-        // a swatch to ink the selection / typing color, click the ring to go
-        // back to the default white. The ring's center fills with the active
-        // ink while the tray is collapsed.
+        // ink ring — a hollow ring; hover it and a thin glass column drops
+        // out of the strip beneath it holding the three swatches, tucking
+        // back up when the mouse leaves. Click a swatch to ink the selection /
+        // typing color, click the ring to go back to the default white. The
+        // ring's center fills with the active ink while the column is closed.
+        // The tab behind the ring is the same 22pt pill as the size button, so
+        // when the column is open they join with no gap.
         let ringX: CGFloat = 62
+        let tabX = ringX + 6 - Style.inkPanelWidth / 2
+        inkTab = InkTab(frame: NSRect(x: tabX, y: Style.panelAttach,
+                                      width: Style.inkPanelWidth, height: Style.tabHeight))
+        inkTab.autoresizingMask = [.maxXMargin, .minYMargin]
+        strip.addSubview(inkTab)
+
         let dotY = (Style.stripHeight - 12) / 2
         inkRing = inkButton(at: NSPoint(x: ringX, y: dotY), action: #selector(inkRingTapped))
         inkRing.layer?.borderWidth = 1.5
@@ -2802,36 +3284,60 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         inkRing.toolTip = "Default white — click to clear the ink"
         strip.addSubview(inkRing)
 
-        // Opening is deliberate: only hovering the ring itself slides the
-        // swatches out. Both zones are click-through, so the ring and swatch
-        // buttons underneath still get every click.
-        let ringZone = HoverZone(frame: inkRing.frame.insetBy(dx: -4, dy: -6))
+        // Hovering the tab (not just the 12pt ring) drops the column.
+        // Click-through, so the ring underneath still gets every click.
+        let ringZone = HoverZone(frame: inkTab.frame)
         ringZone.autoresizingMask = [.maxXMargin, .minYMargin]
         ringZone.onEnter = { [weak self] in self?.setInkTray(expanded: true) }
         strip.addSubview(ringZone)
 
-        // The wider zone spanning the slid-out swatches only keeps the open
-        // tray alive while the mouse travels across it; leaving collapses it.
-        let trayWidth = 18 + CGFloat(Style.inks.count - 1) * 17 + 12   // ring gap + dots
-        let trayZone = HoverZone(frame: NSRect(x: ringX - 4, y: 0,
-                                               width: trayWidth + 12,
-                                               height: Style.stripHeight))
-        trayZone.autoresizingMask = [.maxXMargin, .minYMargin]
-        trayZone.onExit = { [weak self] in self?.setInkTray(expanded: false) }
-        strip.addSubview(trayZone)
-
+        let inkH = 8 + CGFloat(Style.inks.count) * 12
+                   + CGFloat(Style.inks.count - 1) * Style.inkDotGap + 8
+        inkPanel = HangingPanel(frame: NSRect(x: tabX,
+                                              y: container.bounds.height - Style.stripHeight - inkH + Style.panelAttach + Style.panelTuck,
+                                              width: Style.inkPanelWidth, height: inkH))
+        inkPanel.autoresizingMask = [.maxXMargin, .minYMargin]
+        inkPanel.isHidden = true
+        inkPanel.alphaValue = 0
         for (i, inkDef) in Style.inks.enumerated() {
-            let dot = inkButton(at: NSPoint(x: ringX, y: dotY), action: #selector(inkTapped(_:)))
+            let y = inkH - 8 - 12 - CGFloat(i) * (12 + Style.inkDotGap)   // top down
+            let dot = inkButton(at: NSPoint(x: (Style.inkPanelWidth - 12) / 2, y: y),
+                                action: #selector(inkTapped(_:)))
             dot.layer?.backgroundColor = inkDef.color.cgColor
             dot.layer?.borderWidth = 1
             dot.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.35).cgColor
             dot.tag = i
             dot.toolTip = "\(inkDef.name) ink"
-            dot.isHidden = true                 // starts collapsed under the ring
-            dot.alphaValue = 0
-            strip.addSubview(dot, positioned: .below, relativeTo: inkRing)
+            dot.autoresizingMask = [.maxXMargin]
+            inkPanel.content.addSubview(dot)
             inkButtons.append(dot)
         }
+
+        // size button — chevrons + readout as one control; hover drops the
+        // size menu (same as the ink ring). The readout follows the cursor.
+        sizeButton = SizeButton(frame: NSRect(x: 82, y: Style.panelAttach,
+                                              width: Style.sizeMenuWidth, height: Style.tabHeight))
+        sizeButton.autoresizingMask = [.maxXMargin, .minYMargin]
+        sizeButton.onHover = { [weak self] in self?.setSizeMenu(open: true) }
+        sizeLabel = sizeButton.label
+        sizeLabel.stringValue = "\(Style.sizeRank(fontSize))"
+        strip.addSubview(sizeButton)
+
+        // Pixel bubble: start a meeting. Same mark as the menu-bar glyph,
+        // same launch as the Start meeting item. Hidden if Whisper.app is gone.
+        let meet = bareButton(frame: NSRect(x: strip.bounds.width - 48,
+                                            y: (Style.stripHeight - 14) / 2,
+                                            width: 14, height: 14),
+                              target: self, action: #selector(startMeeting))
+        meet.imagePosition = .imageOnly
+        meet.imageScaling = .scaleNone
+        meet.image = speechBubbleImage(size: 14, pixel: 14 / 16)
+        meet.contentTintColor = Style.chromeColor
+        meet.autoresizingMask = [.minXMargin, .minYMargin]
+        meet.toolTip = "Start meeting"
+        meet.isHidden = !whisperAppExists()
+        strip.addSubview(meet)
+        meetingButton = meet
 
         // "✕" close, top-right
         let close = chromeButton("✕", size: 18, fontSize: 12)
@@ -2881,6 +3387,36 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         }
         drawerTab.onDragEnd = { [weak self] in self?.saveDrawerWidth() }
         container.addSubview(drawerTab)
+
+        // The swatch column sits above the body so its dots take the clicks.
+        // Its hover zone spans ring + column; leaving it tucks the column up.
+        container.addSubview(inkPanel)
+        let trayZone = HoverZone(frame: NSRect(x: inkPanel.frame.minX - 6,
+                                               y: inkPanel.frame.minY - 4,
+                                               width: inkPanel.frame.width + 12,
+                                               height: container.bounds.height - inkPanel.frame.minY + 4))
+        trayZone.autoresizingMask = [.maxXMargin, .minYMargin]
+        trayZone.onExit = { [weak self] in self?.setInkTray(expanded: false) }
+        container.addSubview(trayZone)
+
+        // Size menu hover zone: exists from the start so leaving always
+        // closes, even on the first open (a zone added under the cursor
+        // would miss that exit). Covers the 10-row column + the button.
+        let sizeH = min(CGFloat(Style.sizeMenuVisible) * Style.sizeRowHeight + 12,
+                        container.bounds.height - Style.stripHeight - Style.cornerRadius)
+        let sizeY = container.bounds.height - Style.stripHeight - sizeH
+                    + Style.panelAttach + Style.panelTuck
+        sizeZone = HoverZone(frame: NSRect(x: sizeButton.frame.minX - 6,
+                                           y: sizeY - 4,
+                                           width: Style.sizeMenuWidth + 12,
+                                           height: container.bounds.height - (sizeY - 4)))
+        sizeZone.autoresizingMask = [.maxXMargin, .minYMargin]
+        sizeZone.onExit = { [weak self] in self?.setSizeMenu(open: false) }
+        container.addSubview(sizeZone)
+
+        // Strip sits in front of the hanging panels so the chevrons / ring
+        // draw on top of the glass tab.
+        container.addSubview(strip)
 
         // Copy confirmation: sits in the bottom padding, math-green, fades
         // out on its own. Click-through so it never steals a window drag.
@@ -3893,14 +4429,19 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     // MARK: toolbar actions & ink
     @objc private func newNote() { manager?.newNote() }
-
-    @objc private func fontUp()   { changeFont(by: +1) }
-    @objc private func fontDown() { changeFont(by: -1) }
+    @objc private func startMeeting() { manager?.startMeeting() }
 
     private func changeFont(by delta: CGFloat) {
         // Cursor in a section title → step that header's font instead.
         if let s = activeTitleSection { changeTitleFont(of: s, by: delta); return }
-        let newSize = min(max(fontSize + delta, Style.minFont), Style.maxFont)
+        setFont(size: fontSize + delta)
+    }
+
+    /// Make `size` (clamped to the scale) the font at the cursor / selection —
+    /// the stepper and the size menu both land here.
+    private func setFont(size: CGFloat) {
+        if let s = activeTitleSection { setTitleFont(of: s, size: size); return }
+        let newSize = min(max(size, Style.minFont), Style.maxFont)
         guard newSize != fontSize else { return }
         fontSize = newSize
         sizeLabel.stringValue = "\(Style.sizeRank(newSize))"
@@ -3922,7 +4463,11 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     /// Step a section header's font size, mirroring it in the readout.
     private func changeTitleFont(of section: SectionView, by delta: CGFloat) {
-        let newSize = min(max(section.titleFontSize + delta, Style.minFont), Style.maxFont)
+        setTitleFont(of: section, size: section.titleFontSize + delta)
+    }
+
+    private func setTitleFont(of section: SectionView, size: CGFloat) {
+        let newSize = min(max(size, Style.minFont), Style.maxFont)
         guard newSize != section.titleFontSize else { return }
         section.setTitleFontSize(newSize)
         sizeLabel.stringValue = "\(Style.sizeRank(newSize))"
@@ -4019,26 +4564,165 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         drawerTab.toolTip = open ? "Hide the note list" : "Show all notes"
     }
 
+    /// Drop the swatch column out of the strip, or tuck it back up.
     private func setInkTray(expanded: Bool) {
         guard expanded != inkTrayExpanded else { return }
         inkTrayExpanded = expanded
-        if expanded { inkButtons.forEach { $0.isHidden = false } }
+        inkTab.isOpen = expanded
+        setPanel(inkPanel, shown: expanded)
+    }
+
+    /// Where a hanging panel rests: body top on the tab's bottom edge. The
+    /// panel itself is taller (it covers the tab); `bodyHeight` is the dropdown.
+    private func panelRest(_ panel: HangingPanel) -> NSPoint {
+        NSPoint(x: panel.frame.minX,
+                y: container.bounds.height - Style.stripHeight - panel.bodyHeight + Style.panelAttach + Style.panelTuck)
+    }
+
+    /// Fade a hanging panel in with a short drop, or back out (hidden once
+    /// gone so an invisible panel can't eat clicks). Reopening mid-close is
+    /// safe: the animator sets the model alpha to 1 at once, so the earlier
+    /// close's completion sees it and leaves the panel showing.
+    private func setPanel(_ panel: HangingPanel, shown: Bool) {
+        let rest = panelRest(panel)
+        if shown {
+            panel.isHidden = false
+            panel.setFrameOrigin(rest)
+        }
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.22
+            ctx.duration = 0.18
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             ctx.allowsImplicitAnimation = true
-            for (i, dot) in inkButtons.enumerated() {
-                let x = expanded ? inkRing.frame.minX + 18 + CGFloat(i) * 17
-                                 : inkRing.frame.minX
-                dot.animator().setFrameOrigin(NSPoint(x: x, y: dot.frame.origin.y))
-                dot.animator().alphaValue = expanded ? 1 : 0
-            }
-        }, completionHandler: { [weak self] in
-            // Hide only if the tray is still collapsed (guards a quick reopen
-            // racing the collapse animation) so invisible dots can't eat clicks.
-            guard let self, !self.inkTrayExpanded else { return }
-            self.inkButtons.forEach { $0.isHidden = true }
+            panel.animator().alphaValue = shown ? 1 : 0
+        }, completionHandler: { [weak panel] in
+            guard let panel, panel.alphaValue == 0 else { return }
+            panel.isHidden = true
         })
+    }
+
+    // MARK: size menu
+
+    /// Build the menu once: every rank on the scale, one row each, in a
+    /// column that shows `sizeMenuVisible` ranks and scrolls the rest.
+    private func makeSizeMenu() -> HangingPanel {
+        let ranks = Int(Style.maxFont - Style.minFont) + 1
+        let full = CGFloat(ranks) * Style.sizeRowHeight + 12
+        let capped = CGFloat(Style.sizeMenuVisible) * Style.sizeRowHeight + 12
+        let avail = container.bounds.height - Style.stripHeight - Style.cornerRadius
+        let h = min(full, capped, avail)
+        let panel = HangingPanel(frame: NSRect(x: sizeButton.frame.minX,
+                                               y: container.bounds.height - Style.stripHeight - h + Style.panelAttach + Style.panelTuck,
+                                               width: Style.sizeMenuWidth, height: h))
+        panel.autoresizingMask = [.maxXMargin, .minYMargin]
+        panel.isHidden = true
+        panel.alphaValue = 0
+
+        let rowW = Style.sizeMenuWidth - 8
+        let scroll = NSScrollView(frame: NSRect(x: 4, y: 6, width: rowW, height: h - 12))
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = false
+        scroll.hasHorizontalScroller = false
+        scroll.verticalScrollElasticity = .allowed
+        scroll.autoresizingMask = [.width, .height]
+        let stack = FlippedStack()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = stack
+        let clip = scroll.contentView
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: clip.topAnchor),
+            stack.widthAnchor.constraint(equalTo: clip.widthAnchor),
+        ])
+        sizeRows = (1...ranks).map { rank in
+            let r = SizeRow(rank: rank, width: rowW)
+            r.translatesAutoresizingMaskIntoConstraints = false
+            r.heightAnchor.constraint(equalToConstant: Style.sizeRowHeight).isActive = true
+            r.onTap = { [weak self] in
+                guard let self else { return }
+                self.setFont(size: Style.minFont + CGFloat(rank - 1))
+                for row in self.sizeRows { row.isCurrent = row.rank == rank }
+            }
+            return r
+        }
+        sizeRows.forEach { stack.addArrangedSubview($0) }
+        for r in sizeRows { r.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
+        panel.content.addSubview(scroll)
+        sizeScroll = scroll
+
+        let hover = SizeListTracker(frame: scroll.frame)
+        hover.autoresizingMask = [.width, .height]
+        hover.rows = sizeRows
+        hover.attach(to: scroll)
+        panel.content.addSubview(hover)
+
+        // When the list is taller than the column, fade its bottom so the
+        // cut-off row reads as "more below" rather than a mistake.
+        if full > h {
+            // A HoverZone so the fade is click-through: the rows under it
+            // still take the tap.
+            let fade = HoverZone(frame: NSRect(x: 0, y: 0, width: Style.sizeMenuWidth, height: 22))
+            fade.wantsLayer = true
+            let g = CAGradientLayer()
+            g.frame = fade.bounds
+            g.colors = [NSColor(calibratedWhite: 0.12, alpha: 0.85).cgColor, NSColor.clear.cgColor]
+            g.startPoint = CGPoint(x: 0.5, y: 0)   // layers aren't flipped: 0 = bottom
+            g.endPoint = CGPoint(x: 0.5, y: 1)
+            fade.layer?.addSublayer(g)
+            panel.content.addSubview(fade)
+        }
+        container.addSubview(panel, positioned: .below, relativeTo: strip)
+        sizeZone.frame = NSRect(x: panel.frame.minX - 6,
+                                y: panel.frame.minY - 4,
+                                width: panel.frame.width + 12,
+                                height: container.bounds.height - (panel.frame.minY - 4))
+        container.addSubview(sizeZone, positioned: .below, relativeTo: strip)
+        return panel
+    }
+
+    private func setSizeMenu(open: Bool) {
+        guard open != sizeMenuOpen else { return }
+        sizeMenuOpen = open
+        sizeButton.isOpen = open
+        if open {
+            // Rebuild if the note shrank under the 10-row cap (or grew back).
+            let ranks = Int(Style.maxFont - Style.minFont) + 1
+            let want = min(CGFloat(ranks) * Style.sizeRowHeight + 12,
+                           CGFloat(Style.sizeMenuVisible) * Style.sizeRowHeight + 12,
+                           container.bounds.height - Style.stripHeight - Style.cornerRadius)
+            if let m = sizeMenu, m.bodyHeight != want {
+                m.removeFromSuperview()
+                sizeMenu = nil
+            }
+            let menu = sizeMenu ?? makeSizeMenu()
+            sizeMenu = menu
+            let current = Int(sizeLabel.stringValue) ?? Style.sizeRank(fontSize)
+            for r in sizeRows { r.isCurrent = r.rank == current }
+            if let scroll = sizeScroll, let row = sizeRows.first(where: { $0.rank == current }) {
+                scroll.layoutSubtreeIfNeeded()
+                let visible = scroll.contentView.bounds.height
+                let docH = scroll.documentView?.frame.height ?? 0
+                let y = max(0, min(docH - visible, row.frame.midY - visible / 2))
+                scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+            setPanel(menu, shown: true)
+            sizeMenuMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] ev in
+                guard let self, self.sizeMenuOpen,
+                      ev.keyCode == 53, ev.window === self.window else { return ev }
+                self.setSizeMenu(open: false)
+                return nil
+            }
+        } else {
+            if let m = sizeMenu { setPanel(m, shown: false) }
+            if let mon = sizeMenuMonitor {
+                NSEvent.removeMonitor(mon)
+                sizeMenuMonitor = nil
+            }
+        }
     }
 
     /// Ring click: back to the default white ink (recolors any selection too).
@@ -4605,6 +5289,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     func windowDidBecomeKey(_ notification: Notification) {
         applyTint(focused: true)
         restoreCursor()
+        meetingButton?.isHidden = !whisperAppExists()
     }
 
     /// Coming back from another app puts the cursor right back where it was —
@@ -4628,6 +5313,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     func windowDidResignKey(_ notification: Notification) {
         applyTint(focused: false)
+        setSizeMenu(open: false)
         // persist(), not an unconditional save: this also fires while the
         // window is closing, AFTER windowWillClose already deleted an empty
         // note's file — a plain saveNow here resurrected the file and left
@@ -4825,28 +5511,10 @@ final class NotesManager: NSObject, NSMenuDelegate {
 
     // MARK: menu-bar switcher
 
-    /// Status-item glyph: the app icon boiled down to one line - a rounded
-    /// square note with three text lines (long, short, long). Template image,
-    /// so it takes the menu bar's tint like the system icons.
+    /// Status-item glyph: Debrief's 16x16 pixel speech bubble, centered in
+    /// 18x18. Template image so it takes the menu bar's tint like a system icon.
     private static func menuBarGlyph() -> NSImage {
-        let size = NSSize(width: 18, height: 18)
-        let img = NSImage(size: size, flipped: false) { _ in
-            let i: CGFloat = 2.0
-            let box = NSRect(x: i, y: i, width: size.width - i * 2, height: size.height - i * 2)
-            let outline = NSBezierPath(roundedRect: box, xRadius: 3.2, yRadius: 3.2)
-            outline.lineWidth = 1.4
-            NSColor.black.setStroke()
-            outline.stroke()
-            let lines = NSBezierPath()
-            lines.move(to: NSPoint(x: 5, y: 12.95)); lines.line(to: NSPoint(x: 13, y: 12.95))
-            lines.move(to: NSPoint(x: 5, y: 9));     lines.line(to: NSPoint(x: 10, y: 9))
-            lines.move(to: NSPoint(x: 5, y: 5.05));  lines.line(to: NSPoint(x: 13, y: 5.05))
-            lines.lineWidth = 1.4
-            lines.lineCapStyle = .round
-            lines.stroke()
-            return true
-        }
-        img.isTemplate = true
+        let img = speechBubbleImage()
         img.accessibilityDescription = "Postit"
         return img
     }
@@ -4968,10 +5636,27 @@ final class NotesManager: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+        if whisperAppExists() {
+            let start = NSMenuItem(title: "Start meeting",
+                                   action: #selector(startMeetingClicked(_:)),
+                                   keyEquivalent: "")
+            start.target = self
+            menu.addItem(start)
+            menu.addItem(.separator())
+        }
         menu.addItem(NSMenuItem(title: "Quit Postit",
                                 action: #selector(NSApplication.terminate(_:)),
                                 keyEquivalent: "q"))
     }
+
+    func startMeeting() {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        p.arguments = ["-n", "-a", "Whisper", "--args", "--meeting"]
+        try? p.run()
+    }
+
+    @objc private func startMeetingClicked(_ sender: Any?) { startMeeting() }
 
     // MARK: note order (drawer)
 
@@ -5068,12 +5753,13 @@ final class NotesManager: NSObject, NSMenuDelegate {
     }
 
     /// A note created from a file handed to the app (Finder "Open With…" or
-    /// `open -a Postit note.md` — Debrief sends meeting notes through here).
-    /// Plain text body; the block model styles it like typed text.
+    /// `open -a Postit note.md`). Markdown is split into title + sections;
+    /// a file with no headings stays one text block.
     func newNote(fromFileText text: String) {
+        let imported = MarkdownImport.parse(text)
         var data = NoteData(id: UUID().uuidString,
-                            text: text,
-                            blocks: [Block(kind: .text, text: text)])
+                            text: imported.title,
+                            blocks: imported.blocks)
         if let front = controllers.last {
             let f = front.windowRef.frame
             data.frame = [f.origin.x + 26, f.origin.y - 26, f.size.width, f.size.height]
