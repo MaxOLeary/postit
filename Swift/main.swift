@@ -58,6 +58,8 @@ private enum Style {
     /// raw point size, so the scale reads 1, 2, 3, … up from the minimum.
     static func sizeRank(_ size: CGFloat) -> Int { Int(round(size)) - Int(minFont) + 1 }
     static let textColor      = NSColor(calibratedWhite: 0.97, alpha: 1.0)
+    // Checklist: text and strike color of a done line (view-only, never stored).
+    static let doneColor      = NSColor(calibratedWhite: 1.0, alpha: 0.45)
     static let chromeColor    = NSColor(calibratedWhite: 1.0, alpha: 0.55)
     // Selection fill shared by the body text views and the title field
     // editor: translucent, so recolored text shows live under the highlight
@@ -933,7 +935,7 @@ final class NoteStore {
         note.resolvedColumns.map { col in
             col.compactMap { b -> String? in
                 let body = b.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    .components(separatedBy: "\n").map(Bullets.markdownLine).joined(separator: "\n")
+                    .components(separatedBy: "\n").map(Bullets.markdownLine).map(Checklist.markdownLine).joined(separator: "\n")
                 guard b.kind == .section else { return body.isEmpty ? nil : body }
                 let title = b.title.trimmingCharacters(in: .whitespaces)
                 let head = "## \(title.isEmpty ? "Untitled section" : title)"
@@ -1033,7 +1035,7 @@ enum Bullets {
     /// True when the text holds nothing but whitespace and bullet dots — an
     /// "empty" note the user only ever tabbed a bullet into.
     static func isBlank(_ text: String) -> Bool {
-        !text.contains { !$0.isWhitespace && !glyphs.contains($0) }
+        !text.contains { !$0.isWhitespace && !glyphs.contains($0) && !Checklist.glyphs.contains($0) }
     }
     /// Extra left indent per nesting level, in points.
     static let step: CGFloat = 18
@@ -1069,6 +1071,111 @@ enum Bullets {
     static func markdownLine(_ line: String) -> String {
         guard let lvl = level(of: line) else { return line }
         return String(repeating: "  ", count: lvl) + "- " + line.dropFirst(2)
+    }
+}
+
+/// Checklist lines: a paragraph whose first two characters are "☐ " (to do)
+/// or "☑ " (done). Same storage trick as bullets, so a box round-trips
+/// through RTF, undo, and the pasteboard with no new fields, and flipping
+/// done / not done is a one-character replace.
+enum Checklist {
+    static let todo: Character = "☐"
+    static let done: Character = "☑"
+    static let glyphs: [Character] = [todo, done]
+
+    /// Done state of a paragraph that starts with a checklist prefix, or nil.
+    static func state(of paragraph: String) -> Bool? {
+        guard let first = paragraph.first, paragraph.dropFirst().first == " ",
+              glyphs.contains(first) else { return nil }
+        return first == done
+    }
+
+    static func prefix(done: Bool) -> String {
+        String(done ? Self.done : todo) + " "
+    }
+
+    /// Paragraph style for a checklist line: wrapped lines start after the box.
+    static func paragraphStyle(font: NSFont) -> NSParagraphStyle {
+        let ps = NSMutableParagraphStyle()
+        ps.firstLineHeadIndent = 0
+        ps.headIndent = (prefix(done: false) as NSString).size(withAttributes: [.font: font]).width
+        return ps
+    }
+
+    /// Markdown for one plain-text line: `☐ x` → `- [ ] x`, `☑ x` → `- [x] x`;
+    /// anything else passes through.
+    static func markdownLine(_ line: String) -> String {
+        guard let done = state(of: line) else { return line }
+        return (done ? "- [x] " : "- [ ] ") + line.dropFirst(2)
+    }
+
+    /// Enumerate every checklist paragraph of `ns` that touches `range`
+    /// (widened to full paragraphs first, so a partial redraw still finds
+    /// the paragraph start). Calls `body` with the paragraph range and its
+    /// done state.
+    static func enumerateLines(in ns: NSString, touching range: NSRange,
+                               _ body: (NSRange, Bool) -> Void) {
+        let scope = ns.paragraphRange(for: range)
+        withoutActuallyEscaping(body) { body in
+            ns.enumerateSubstrings(in: scope, options: [.byParagraphs, .substringNotRequired]) { _, _, para, _ in
+                guard para.length >= 2 else { return }
+                let head = ns.substring(with: NSRange(location: para.location, length: 2))
+                if let done = state(of: head) { body(para, done) }
+            }
+        }
+    }
+}
+
+// Box painting adapted from PasteList by Zhan Li (github.com/Zhan-Li/pastelist), MIT License.
+/// Paints a real checkbox where a paragraph starts with ☐ / ☑. The character
+/// stays in the text (its glyph is made transparent with a temporary
+/// attribute by `GrowingTextView.refreshChecklistLook`); only its pixels are
+/// replaced, so undo, RTF, and the pasteboard never see the drawing.
+final class ChecklistLayoutManager: NSLayoutManager {
+    /// Where the box for the marker at `charIndex` is drawn, in text view
+    /// coordinates before the text container origin is applied. Sized from
+    /// the character's own font and kept inside the glyph's own advance.
+    func boxRect(forMarkerAt charIndex: Int) -> NSRect? {
+        guard let storage = textStorage, charIndex < storage.length else { return nil }
+        let g = glyphRange(forCharacterRange: NSRange(location: charIndex, length: 1), actualCharacterRange: nil)
+        guard g.length > 0, let container = textContainer(forGlyphAt: g.location, effectiveRange: nil) else { return nil }
+        let font = (storage.attribute(.font, at: charIndex, effectiveRange: nil) as? NSFont)
+            ?? NSFont.systemFont(ofSize: Style.defaultFont)
+        let lineRect = lineFragmentRect(forGlyphAt: g.location, effectiveRange: nil)
+        let baseline = lineRect.minY + location(forGlyphAt: g.location).y
+        let glyphRect = boundingRect(forGlyphRange: g, in: container)
+        let side = min(glyphRect.width, font.capHeight * 1.35).rounded()
+        guard side > 0 else { return nil }
+        let capMid = baseline - font.capHeight / 2
+        return NSRect(x: (glyphRect.midX - side / 2).rounded(), y: (capMid - side / 2).rounded(),
+                      width: side, height: side)
+    }
+
+    /// Not done: a white rounded outline. Done: the same shape as one solid
+    /// block of the dimmed "done" grey. No checkmark.
+    static func drawBox(in rect: NSRect, done: Bool) {
+        let radius = rect.width * 0.28
+        if done {
+            Style.doneColor.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+        } else {
+            let box = NSBezierPath(roundedRect: rect.insetBy(dx: 0.8, dy: 0.8), xRadius: radius, yRadius: radius)
+            box.lineWidth = 1.6
+            Style.textColor.setStroke()
+            box.stroke()
+        }
+    }
+
+    override func drawGlyphs(forGlyphRange glyphsToShow: NSRange, at origin: NSPoint) {
+        super.drawGlyphs(forGlyphRange: glyphsToShow, at: origin)
+        guard let storage = textStorage else { return }
+        let chars = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
+        Checklist.enumerateLines(in: storage.string as NSString, touching: chars) { para, done in
+            guard var rect = boxRect(forMarkerAt: para.location) else { return }
+            rect.origin.x += origin.x
+            rect.origin.y += origin.y
+            Self.drawBox(in: rect, done: done)
+        }
     }
 }
 
@@ -1149,6 +1256,7 @@ enum WelcomeNote {
                 ("Shift + WW   back to white\n", nil),
                 ("Shift + ##   a new dropdown menu\n", nil),
                 ("- ␣   start a bullet list (Tab / Shift+Tab nest it, Enter on an empty bullet ends it)\n", nil),
+                ("[]␣   checkbox (click the box to tick it off; Cmd+Shift+D does the same)\n", nil),
                 ("""
                  Cmd+= / Cmd+-   bigger / smaller text
                  Cmd+N   new note
@@ -1966,6 +2074,84 @@ final class GrowingTextView: NSTextView {
         super.didChangeText()
         invalidateIntrinsicContentSize()
         refreshMath()
+        refreshChecklistLook()
+    }
+
+    // MARK: checklists (look + click)
+
+    /// Re-derive the checklist look as layout manager *temporary* attributes:
+    /// the ☐ / ☑ glyph goes clear (the layout manager paints a box over it),
+    /// and a done line's body is struck through and dimmed. Temporary
+    /// attributes never reach the text storage, RTF, undo, or the pasteboard,
+    /// so the ink under a done line is untouched and returns when unchecked.
+    func refreshChecklistLook() {
+        guard let lm = layoutManager else { return }
+        let ns = string as NSString
+        let full = NSRange(location: 0, length: ns.length)
+        if full.length > 0 {
+            for key in [NSAttributedString.Key.foregroundColor, .strikethroughStyle, .strikethroughColor] {
+                lm.removeTemporaryAttribute(key, forCharacterRange: full)
+            }
+        }
+        guard Checklist.glyphs.contains(where: { string.contains($0) }) else { return }
+        Checklist.enumerateLines(in: ns, touching: full) { para, done in
+            lm.addTemporaryAttribute(.foregroundColor, value: NSColor.clear,
+                                     forCharacterRange: NSRange(location: para.location, length: 1))
+            guard done else { return }
+            var body = NSRange(location: para.location + 2, length: para.length - 2)
+            if body.length > 0, ns.character(at: NSMaxRange(body) - 1) == 0x0A { body.length -= 1 }
+            guard body.length > 0 else { return }
+            lm.addTemporaryAttributes([
+                .strikethroughStyle: NSUnderlineStyle.thick.rawValue,
+                .strikethroughColor: Style.doneColor,
+                .foregroundColor: Style.doneColor,
+            ], forCharacterRange: body)
+        }
+        needsDisplay = true
+        window?.invalidateCursorRects(for: self)
+    }
+
+    /// The box under `point` (view coordinates), as the range of its marker
+    /// character, or nil when the press is not on a box.
+    private func checklistBox(at point: NSPoint) -> NSRange? {
+        guard let lm = layoutManager as? ChecklistLayoutManager else { return nil }
+        let ns = string as NSString
+        guard ns.length > 0 else { return nil }
+        let idx = min(characterIndexForInsertion(at: point), ns.length)
+        let para = ns.paragraphRange(for: NSRange(location: idx, length: 0))
+        guard para.length >= 2,
+              Checklist.state(of: ns.substring(with: NSRange(location: para.location, length: 2))) != nil,
+              var rect = lm.boxRect(forMarkerAt: para.location) else { return nil }
+        rect.origin.x += textContainerOrigin.x
+        rect.origin.y += textContainerOrigin.y
+        return rect.insetBy(dx: -3, dy: -3).contains(point) ? NSRange(location: para.location, length: 1) : nil
+    }
+
+    /// Flip the marker at `range` between ☐ and ☑ as one undoable edit, keeping
+    /// the selection where it was. The delegate's textDidChange saves.
+    private func toggleChecklist(at range: NSRange) {
+        guard let ts = textStorage else { return }
+        let sel = selectedRange()
+        let cur = (string as NSString).substring(with: range)
+        let new = cur == String(Checklist.todo) ? String(Checklist.done) : String(Checklist.todo)
+        guard shouldChangeText(in: range, replacementString: new) else { return }
+        ts.replaceCharacters(in: range, with: new)     // keeps the glyph's attributes
+        didChangeText()
+        setSelectedRange(sel)
+    }
+
+    /// A pointing hand over every box, so it reads as clickable.
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard let lm = layoutManager as? ChecklistLayoutManager else { return }
+        let ns = string as NSString
+        guard ns.length > 0 else { return }
+        Checklist.enumerateLines(in: ns, touching: NSRange(location: 0, length: ns.length)) { para, _ in
+            guard var r = lm.boxRect(forMarkerAt: para.location) else { return }
+            r.origin.x += textContainerOrigin.x
+            r.origin.y += textContainerOrigin.y
+            addCursorRect(r.insetBy(dx: -2, dy: -2), cursor: .pointingHand)
+        }
     }
 
     /// Re-evaluate this block's math lines. The fast path (no ":math"
@@ -2036,6 +2222,11 @@ final class GrowingTextView: NSTextView {
         // No system text replacement — it's what turns a double-space into a
         // period (sentence capitalization is done in the controller instead).
         tv.isAutomaticTextReplacementEnabled = false
+        // Touching `layoutManager` first pins the view to TextKit 1 (the rest of
+        // this class already depends on it), then the checklist painter goes in.
+        _ = tv.layoutManager
+        tv.textContainer?.replaceLayoutManager(ChecklistLayoutManager())
+        assert(tv.layoutManager is ChecklistLayoutManager)
         tv.textContainer?.lineFragmentPadding = 0
         tv.textContainer?.widthTracksTextView = true
         tv.textContainer?.heightTracksTextView = false
@@ -2066,6 +2257,7 @@ final class GrowingTextView: NSTextView {
         }
         invalidateIntrinsicContentSize()
         refreshMath()
+        refreshChecklistLook()
     }
 
     /// The current content as base64 RTF (keeps per-range fonts).
@@ -2139,6 +2331,12 @@ final class GrowingTextView: NSTextView {
     /// the whole drag inside its own mouseDown — so the range is noted on the
     /// way in, before the selection can move.
     override func mouseDown(with event: NSEvent) {
+        // A press on a checkbox toggles it and stops there, so the caret
+        // stays where it was.
+        if let box = checklistBox(at: convert(event.locationInWindow, from: nil)) {
+            toggleChecklist(at: box)
+            return
+        }
         rememberSelectionForDrag()
         super.mouseDown(with: event)
     }
@@ -4865,6 +5063,16 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             return false
         }
 
+        // "[] " or "[ ] " at the start of a line → a checklist box. Same
+        // dance: the brackets are already in the text; swap them for the
+        // box prefix and swallow the space.
+        if replacementString == " ", affectedCharRange.length == 0,
+           !textView.hasMarkedText(), startsChecklistTrigger(at: affectedCharRange.location, in: textView) {
+            let para = paragraphRange(in: textView, at: affectedCharRange.location)
+            setChecklist(done: false, on: para, in: textView)
+            return false
+        }
+
         // Backspacing the letter the auto-cap just uppercased reads as
         // "I wanted lowercase" — arm the one-shot bypass for that spot.
         let tvID = ObjectIdentifier(textView)
@@ -4946,7 +5154,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             let char = Character(scalar)
             if char == " " || char == "\t" { sawSpace = true; i -= 1; continue }
             if char.isNewline { return true }
-            if sawSpace, Bullets.glyphs.contains(char),
+            if sawSpace, Bullets.glyphs.contains(char) || Checklist.glyphs.contains(char),
                i == paragraphRange(in: tv, at: i).location { return true }
             return sawSpace && ".!?".contains(char)
         }
@@ -4994,17 +5202,70 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     @objc func biggerText(_ sender: Any?) { changeFont(by: +1) }
     @objc func smallerText(_ sender: Any?) { changeFont(by: -1) }
 
+    /// Cmd+Shift+L (Edit menu): put a box on every paragraph in the selection
+    /// (or the caret line); when they all already have one, strip them all.
+    @objc func toggleChecklist(_ sender: Any?) {
+        guard let tv = activeText ?? firstTextView() else { return }
+        let sel = tv.selectedRange()
+        let s = tv.string as NSString
+        let span = s.paragraphRange(for: sel)
+        // Last first, so earlier ranges stay valid while we edit.
+        var paras: [(NSRange, Bool?)] = []
+        s.enumerateSubstrings(in: span, options: [.byParagraphs, .substringNotRequired]) { _, _, enclosing, _ in
+            paras.append((enclosing, self.checklistState(of: enclosing, in: tv)))
+        }
+        if paras.isEmpty { paras = [(span, nil)] }      // empty block or a bare trailing line
+        let addBoxes = paras.contains { $0.1 == nil }
+        for (range, state) in paras.reversed() {
+            if addBoxes {
+                if state == nil { setChecklist(done: false, on: range, in: tv) }
+            } else {
+                setChecklist(done: nil, on: range, in: tv)
+            }
+        }
+        if sel.length > 0 {
+            let grown = (tv.string as NSString).length - s.length
+            tv.setSelectedRange(NSRange(location: span.location, length: span.length + grown))
+        }
+    }
+
+    /// Cmd+Shift+D (Edit menu): flip done / not done on every checklist line
+    /// in the selection, or the caret line. A one-character swap per line,
+    /// so nothing shifts and the selection stays put.
+    @objc func toggleDone(_ sender: Any?) {
+        guard let tv = activeText ?? firstTextView(), let ts = tv.textStorage else { return }
+        let sel = tv.selectedRange()
+        let s = tv.string as NSString
+        var flips: [(NSRange, Bool)] = []
+        s.enumerateSubstrings(in: s.paragraphRange(for: sel),
+                              options: [.byParagraphs, .substringNotRequired]) { _, _, enclosing, _ in
+            if let done = self.checklistState(of: enclosing, in: tv) {
+                flips.append((NSRange(location: enclosing.location, length: 1), done))
+            }
+        }
+        guard !flips.isEmpty else { return }
+        for (range, done) in flips.reversed() {
+            let glyph = String(done ? Checklist.todo : Checklist.done)
+            guard tv.shouldChangeText(in: range, replacementString: glyph) else { continue }
+            ts.replaceCharacters(in: range, with: glyph)     // keeps the glyph's attributes
+            tv.didChangeText()
+        }
+        tv.setSelectedRange(sel)
+        saveDebounced()
+    }
+
     /// Enter / Backspace / Tab get bullet handling before AppKit sees them.
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         switch commandSelector {
         case #selector(NSResponder.deleteBackward(_:)):
-            return backspaceOutOfBullet(textView) || backspaceAcrossBlocks(textView)
+            return backspaceOutOfChecklist(textView) || backspaceOutOfBullet(textView)
+                || backspaceAcrossBlocks(textView)
         case #selector(NSResponder.insertNewline(_:)):
-            return newlineInBullet(textView)
+            return newlineInChecklist(textView) || newlineInBullet(textView)
         case #selector(NSResponder.insertTab(_:)):
-            return nestBullet(textView, by: +1)
+            return onChecklistLine(textView) || nestBullet(textView, by: +1)
         case #selector(NSResponder.insertBacktab(_:)):
-            return nestBullet(textView, by: -1)
+            return onChecklistLine(textView) || nestBullet(textView, by: -1)
         default:
             return false
         }
@@ -5125,6 +5386,99 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             if next != lvl { setBullet(level: next, on: range, in: tv) }
         }
         if sel.length > 0 { tv.setSelectedRange(s.paragraphRange(for: sel)) }
+        return true
+    }
+
+    // MARK: checklists
+
+    /// Done state if the paragraph at `range` is a checklist line, else nil.
+    private func checklistState(of range: NSRange, in tv: NSTextView) -> Bool? {
+        Checklist.state(of: (tv.string as NSString).substring(with: range))
+    }
+
+    /// True when the caret's paragraph is a checklist line. Tab / Shift+Tab
+    /// are swallowed there: boxes don't nest, and a tab character would
+    /// break the prefix.
+    private func onChecklistLine(_ tv: NSTextView) -> Bool {
+        checklistState(of: paragraphRange(in: tv, at: tv.selectedRange().location), in: tv) != nil
+    }
+
+    /// True when the space being typed at `location` would complete a "[] "
+    /// or "[ ] " trigger: the paragraph so far is exactly the brackets.
+    private func startsChecklistTrigger(at location: Int, in tv: NSTextView) -> Bool {
+        let para = paragraphRange(in: tv, at: location)
+        let sofar = (tv.string as NSString).substring(with: NSRange(location: para.location,
+                                                                     length: location - para.location))
+        return sofar == "[]" || sofar == "[ ]"
+    }
+
+    /// Make the paragraph at `range` a checklist line (nil removes the box).
+    /// Strips a "[]"/"[ ]" trigger, an existing box, or a bullet prefix (a
+    /// line is one or the other), rewrites the prefix and paragraph style
+    /// as one undoable edit, and leaves the caret on the same character.
+    private func setChecklist(done: Bool?, on range: NSRange, in tv: NSTextView) {
+        guard let ts = tv.textStorage else { return }
+        let text = (tv.string as NSString).substring(with: range)
+        var stripLen = 0
+        if Checklist.state(of: text) != nil || Bullets.level(of: text) != nil { stripLen = 2 }
+        else if text.hasPrefix("[ ]") { stripLen = 3 }
+        else if text.hasPrefix("[]") { stripLen = 2 }
+        let newPrefix = done.map(Checklist.prefix(done:)) ?? ""
+        let old = NSRange(location: range.location, length: stripLen)
+        let sel = tv.selectedRange()
+        guard tv.shouldChangeText(in: old, replacementString: newPrefix) else { return }
+        ts.beginEditing()
+        ts.replaceCharacters(in: old, with: NSAttributedString(
+            string: newPrefix, attributes: [.font: currentFont, .foregroundColor: ink ?? Style.textColor]))
+        let para = NSRange(location: range.location, length: range.length - stripLen + (newPrefix as NSString).length)
+        if done != nil {
+            ts.addAttribute(.paragraphStyle, value: Checklist.paragraphStyle(font: currentFont), range: para)
+        } else {
+            ts.removeAttribute(.paragraphStyle, range: para)
+        }
+        ts.endEditing()
+        tv.didChangeText()
+        let delta = (newPrefix as NSString).length - stripLen
+        var loc = sel.location
+        if sel.location >= range.location {
+            loc = max(loc + delta, range.location + (newPrefix as NSString).length)
+        }
+        tv.setSelectedRange(NSRange(location: min(max(loc, 0), (tv.string as NSString).length), length: 0))
+        tv.typingAttributes[.paragraphStyle] = done == nil ? nil : Checklist.paragraphStyle(font: currentFont)
+        saveDebounced()
+    }
+
+    /// Enter on a checklist line: an empty box ends the list, otherwise the
+    /// next line starts with a fresh box.
+    private func newlineInChecklist(_ tv: NSTextView) -> Bool {
+        let sel = tv.selectedRange()
+        let para = paragraphRange(in: tv, at: sel.location)
+        guard checklistState(of: para, in: tv) != nil else { return false }
+        let s = tv.string as NSString
+        let body = s.substring(with: para).dropFirst(2).trimmingCharacters(in: .whitespacesAndNewlines)
+        if body.isEmpty {
+            setChecklist(done: nil, on: para, in: tv)
+            return true
+        }
+        let insert = "\n" + Checklist.prefix(done: false)
+        guard tv.shouldChangeText(in: sel, replacementString: insert) else { return true }
+        tv.textStorage?.replaceCharacters(in: sel, with: NSAttributedString(
+            string: insert, attributes: [.font: currentFont, .foregroundColor: ink ?? Style.textColor,
+                                         .paragraphStyle: Checklist.paragraphStyle(font: currentFont)]))
+        tv.didChangeText()
+        tv.setSelectedRange(NSRange(location: sel.location + (insert as NSString).length, length: 0))
+        saveDebounced()
+        return true
+    }
+
+    /// Backspace with the caret right after the box removes the box instead
+    /// of eating the space.
+    private func backspaceOutOfChecklist(_ tv: NSTextView) -> Bool {
+        let sel = tv.selectedRange()
+        guard sel.length == 0 else { return false }
+        let para = paragraphRange(in: tv, at: sel.location)
+        guard checklistState(of: para, in: tv) != nil, sel.location == para.location + 2 else { return false }
+        setChecklist(done: nil, on: para, in: tv)
         return true
     }
 
@@ -5847,6 +6201,9 @@ private func makeMainMenu() -> NSMenu {
     editMenu.addItem(.separator())
     editMenu.addItem(withTitle: "Bigger Text",  action: #selector(NoteController.biggerText(_:)),  keyEquivalent: "=")
     editMenu.addItem(withTitle: "Smaller Text", action: #selector(NoteController.smallerText(_:)), keyEquivalent: "-")
+    editMenu.addItem(.separator())
+    editMenu.addItem(withTitle: "Checklist", action: #selector(NoteController.toggleChecklist(_:)), keyEquivalent: "L")
+    editMenu.addItem(withTitle: "Mark Done", action: #selector(NoteController.toggleDone(_:)),      keyEquivalent: "D")
     editMenu.addItem(.separator())
     editMenu.addItem(withTitle: "Close",      action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
     editItem.submenu = editMenu

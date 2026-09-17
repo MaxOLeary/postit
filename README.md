@@ -41,6 +41,8 @@ a simpler blur.
 - Collapsible sections with titles. Type `##` to insert one.
 - Bullet lists: type `- ` at the start of a line. Tab nests, Enter on an
   empty bullet ends the list.
+- Checklists: type `[] ` at the start of a line. Click the box to tick it
+  off; done lines get struck through.
 - A live calculator: type `:math` on a line and the lines below it are
   computed as you type. Percentages, units, and currency all work. `:end`
   turns it off.
@@ -64,6 +66,8 @@ as a new sticky. Without Whisper the bubble stays hidden.
 | `WW` | back to white |
 | `##` | insert a section |
 | `- ` at the start of a line | bullet list |
+| `[] ` at the start of a line | checkbox (click it to tick it off) |
+| Cmd+Shift+L / Cmd+Shift+D | checklist on/off / mark done |
 | Cmd+= / Cmd+- | bigger / smaller text |
 | `:math` on its own line | calculator (`:end` stops it) |
 
