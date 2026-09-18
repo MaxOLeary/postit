@@ -6149,6 +6149,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Cmd+N from the main menu (reaches here via the responder chain).
     @objc func newNote(_ sender: Any?) { notes.newNote() }
 
+    /// The app boots as `.accessory` (menu-bar icon, no Dock tile), but an
+    /// accessory app that becomes frontmost owns a menu bar it can't draw:
+    /// macOS leaves the previous app's menu titles up there and they go dead
+    /// until you click another app. So while a note has focus, promote to a
+    /// regular app (real Postit/Edit menus, a Dock tile for the moment) and
+    /// drop back to accessory as soon as focus leaves.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard NSApp.activationPolicy() != .regular, !promoting else { return }
+        promoting = true
+        NSApp.setActivationPolicy(.regular)
+        // The menu bar only redraws when an app *becomes* active, and we
+        // already are — `activate` on an active app is a no-op. Bounce
+        // focus to the Dock for a beat and take it straight back so the
+        // system installs our menus.
+        if let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first {
+            dock.activate(options: [])
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            NSApp.activate(ignoringOtherApps: true)
+            self.promoting = false
+        }
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        guard !promoting else { return }   // the Dock bounce above, not a real switch-away
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    /// True during the Dock bounce so the resign handler doesn't undo it.
+    private var promoting = false
+
     /// Files handed to the app (Finder "Open With…", `open -a Postit x.md`):
     /// each becomes a new note holding the file's text.
     func application(_ application: NSApplication, open urls: [URL]) {
