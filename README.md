@@ -5,7 +5,7 @@
 
 Post-it notes for the Mac. Translucent glass notes that sit on your desktop.
 
-<img src="screenshot.png" alt="A Postit note on the desktop, showing colored ink and a collapsible section" width="560">
+<img src="screenshot.png" alt="The Postit welcome note on the desktop, with the note drawer open and the meetings section expanded" width="560">
 
 ## Download
 

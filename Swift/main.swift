@@ -1187,7 +1187,7 @@ final class ChecklistLayoutManager: NSLayoutManager {
 /// deleting all your notes later gives you a blank one, not this again.
 enum WelcomeNote {
     private static let seededKey = "DidSeedWelcomeNote"
-    private static let size = NSSize(width: 764, height: 722)
+    private static let size = NSSize(width: 764, height: 800)
 
     /// The welcome note, saved to disk so it survives a quit, or nil if this
     /// install has already been given one.
@@ -1195,6 +1195,12 @@ enum WelcomeNote {
         let defaults = UserDefaults.standard
         guard !defaults.bool(forKey: seededKey) else { return nil }
         defaults.set(true, forKey: seededKey)
+        return make()
+    }
+
+    /// A fresh copy of the tour, saved like any other note. The menu bar's
+    /// "Welcome note" item opens one of these whenever you want it back.
+    static func make() -> NoteData {
         let note = NoteData(id: UUID().uuidString,
                             text: "Welcome to Postit",
                             fontSize: Style.defaultFont,
@@ -1245,26 +1251,39 @@ enum WelcomeNote {
             body([("""
                    Welcome to Postit
 
-                   Notes that sit on your desktop.
+                   Notes that sit on your desktop. Everything below is live, so try it right here.
                    """, nil)]),
 
-            section("Dropdown menu", collapsed: false, [
-                ("Type the same character twice in a row. Both letters vanish and the action happens.\n\n", nil),
+            section("Shortcuts", collapsed: false, [
+                ("This box is a section. Click its title to fold it, drag the title to move it.\n\n", nil),
+                ("Type the same capital letter twice in a row. Both letters vanish and the action happens.\n\n", nil),
                 ("Shift + ", nil), ("RR", ink("R")), ("   red ink\n", nil),
                 ("Shift + ", nil), ("GG", ink("G")), ("   green ink\n", nil),
                 ("Shift + ", nil), ("BB", ink("B")), ("   blue ink\n", nil),
                 ("Shift + WW   back to white\n", nil),
-                ("Shift + ##   a new dropdown menu\n", nil),
+                ("Shift + ##   a new section\n", nil),
                 ("- ␣   start a bullet list (Tab / Shift+Tab nest it, Enter on an empty bullet ends it)\n", nil),
-                ("[]␣   checkbox (click the box to tick it off; Cmd+Shift+D does the same)\n", nil),
+                ("[]␣   checkbox (click the box to tick it off)\n", nil),
                 ("""
-                 Cmd+= / Cmd+-   bigger / smaller text
+                 Cmd+Shift+L / Cmd+Shift+D   checklist on / off, mark done
+                 Cmd+= / Cmd+-   bigger / smaller text (Shift+↑/↓ does it at the cursor)
                  Cmd+N   new note
                  Cmd+W   close this note (it stays saved)
                  Cmd+Z / Cmd+Shift+Z   undo / redo
                  Cmd+Q   quit
                  """, nil),
             ]),
+
+            section("Debrief meeting transcript", collapsed: false, [("""
+                                  Click the speech bubble in the toolbar (or Start \
+                                  meeting in the menu bar) to record a meeting. When \
+                                  you stop, the notes and the full transcript land \
+                                  here as a new sticky.
+
+                                  Needs Whisper, a free companion app: \
+                                  github.com/MaxOLeary/whisper. Until it's installed \
+                                  the bubble stays hidden.
+                                  """, nil)]),
 
             section("Math mode", [("""
                                    Put :math on its own line and everything under it \
@@ -1281,20 +1300,25 @@ enum WelcomeNote {
                                    """, nil)]),
 
             section("Notes & windows", [("""
+                                         Every note has a drawer on its left edge. Grab \
+                                         the pill in the left margin to slide out a list \
+                                         of all your notes: click one to open it, drag \
+                                         to reorder, two-finger swipe left to delete. \
+                                         Esc tucks it away.
+
                                          Drag one note onto another's edge and hold for a \
                                          moment: the edge glows, and letting go merges them \
                                          into side-by-side columns. Grab the pill at a \
                                          column's top-right corner to pull it back out into \
                                          its own note.
 
-                                         Drag a section by its title to move it around.
-
                                          Click a note to bring it forward, click another \
-                                         app to send it behind — same stacking as any \
+                                         app to send it behind, same stacking as any \
                                          other window.
 
                                          The menu-bar icon lists every note you've saved. \
-                                         Click one to reopen it, or the ✕ to delete it.
+                                         Click one to reopen it, or the ✕ to delete it. \
+                                         This tour lives there too, under Welcome note.
                                          """, nil)]),
         ]
     }
@@ -5998,10 +6022,23 @@ final class NotesManager: NSObject, NSMenuDelegate {
             menu.addItem(start)
             menu.addItem(.separator())
         }
+        let tour = NSMenuItem(title: "Welcome note",
+                              action: #selector(welcomeClicked(_:)),
+                              keyEquivalent: "")
+        tour.target = self
+        menu.addItem(tour)
         menu.addItem(NSMenuItem(title: "Quit Postit",
                                 action: #selector(NSApplication.terminate(_:)),
                                 keyEquivalent: "q"))
     }
+
+    /// Menu bar → Welcome note: a fresh copy of the first-launch tour.
+    func openWelcome() {
+        let c = open(WelcomeNote.make())
+        c.windowRef.makeKeyAndOrderFront(nil)
+        controllers.forEach { $0.refreshDrawer() }
+    }
+    @objc private func welcomeClicked(_ sender: Any?) { openWelcome() }
 
     func startMeeting() {
         let p = Process()
@@ -6143,6 +6180,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         notes.start()
+        // `open -a Postit --args --welcome`: also open a copy of the tour.
+        if CommandLine.arguments.contains("--welcome") { notes.openWelcome() }
         CurrencyRates.shared.refreshIfStale()   // for :math currency lines
     }
 
