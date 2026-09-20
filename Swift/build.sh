@@ -126,8 +126,10 @@ refresh_root() {
     # repo can ship a binary several commits behind main.swift and nothing
     # says so. verify-tracked-app.sh reads this back.
     COMMIT="$(git -C .. rev-parse HEAD 2>/dev/null || echo unknown)"
+    # Source only: refresh_root has already rewritten ../$APP above, so asking
+    # git about the whole tree here would always answer "dirty".
     DIRTY=false
-    [ -n "$(git -C .. status --porcelain 2>/dev/null)" ] && DIRTY=true
+    [ -n "$(git -C .. status --porcelain -- Swift VERSION 2>/dev/null)" ] && DIRTY=true
     DIGEST="$(shasum -a 256 "../$APP/Contents/MacOS/Postit" | cut -d' ' -f1)"
     cat > ../SHIPPED.json <<JSON
 {
