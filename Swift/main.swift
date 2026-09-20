@@ -825,9 +825,23 @@ final class NoteStore {
         let base = FileManager.default.urls(for: .applicationSupportDirectory,
                                             in: .userDomainMask).first!
         let d = base.appendingPathComponent("Postit/notes", isDirectory: true)
-        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(
+            at: d, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        // Also clamp a directory an older build already created under the
+        // default umask, so existing installs stop being world-readable too.
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700],
+                                               ofItemAtPath: d.path)
         return d
     }()
+
+    /// Note bodies are personal, and an atomic write creates a fresh file each
+    /// time under whatever the process umask allows — which on a shared Mac is
+    /// world-readable. Re-clamp to owner-only after every write.
+    fileprivate static func ownerOnly(_ url: URL) {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                               ofItemAtPath: url.path)
+    }
 
     /// Just enough of a note to label it in the switcher.
     private struct NoteHead: Codable { let id: String; let text: String }
@@ -910,7 +924,9 @@ final class NoteStore {
               !path.isEmpty else { return nil }
         let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath,
                       isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(
+            at: url, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
         return url
     }()
 
@@ -948,8 +964,10 @@ final class NoteStore {
         guard let dir = NoteStore.mirrorDir else { return }
         let name = NoteStore.slug(note.text) + mirrorSuffix
         deleteMirror(except: name)
+        let file = dir.appendingPathComponent(name)
         try? NoteStore.markdown(for: note)
-            .write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8)
+            .write(to: file, atomically: true, encoding: .utf8)
+        NoteStore.ownerOnly(file)
     }
 
     /// Remove this note's mirror file(s) — all of them on delete, or the
@@ -984,6 +1002,7 @@ final class NoteStore {
             guard let note = snapshot() else { return }
             if let data = try? JSONEncoder().encode(note) {
                 try? data.write(to: url, options: .atomic)
+                NoteStore.ownerOnly(url)
             }
             self?.writeMirror(note)
         }
@@ -997,6 +1016,7 @@ final class NoteStore {
         pending = nil
         if let data = try? JSONEncoder().encode(note) {
             try? data.write(to: url, options: .atomic)
+            NoteStore.ownerOnly(url)
         }
         writeMirror(note)
     }
@@ -1886,7 +1906,12 @@ final class CurrencyRates {
     /// a failure just leaves the cached (or absent) rates in place.
     func refreshIfStale() {
         if fetching { return }
-        if let t = fetchedAt, rates != nil, Date().timeIntervalSince(t) < 24 * 3600 { return }
+        // A cache stamped in the future (clock skew, a restored backup) used to
+        // satisfy "under a day old" forever and wedge the rates permanently.
+        if let t = fetchedAt, rates != nil {
+            let age = Date().timeIntervalSince(t)
+            if age >= 0, age < 24 * 3600 { return }
+        }
         guard let url = URL(string: "https://open.er-api.com/v6/latest/USD") else { return }
         fetching = true
         var req = URLRequest(url: url)
@@ -3711,6 +3736,11 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     deinit {
         copyToastHide?.cancel()
+        // Local event monitors are process-global: a note closed with the
+        // drawer (or size menu) open would otherwise leave a live keyDown
+        // handler behind for the rest of the login session.
+        if let mon = drawerEscMonitor { NSEvent.removeMonitor(mon) }
+        if let mon = sizeMenuMonitor { NSEvent.removeMonitor(mon) }
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -5695,7 +5725,10 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         // persist(), not an unconditional save: this also fires while the
         // window is closing, AFTER windowWillClose already deleted an empty
         // note's file — a plain saveNow here resurrected the file and left
-        // ghost "Untitled" notes in the lists.
+        // ghost "Untitled" notes in the lists. A discarded note skips it
+        // outright: the manager is removing that file, so any write here is a
+        // race to rewrite what's being deleted.
+        if discarding { return }
         persist()
     }
 
@@ -6095,7 +6128,7 @@ final class NotesManager: NSObject, NSMenuDelegate {
     func confirmDelete(id: String, title: String) {
         let alert = NSAlert()
         alert.messageText = "Delete “\(title.isEmpty ? "this note" : title)”?"
-        alert.informativeText = "This permanently removes the note. It can’t be undone."
+        alert.informativeText = "Postit deletes the note’s file. There is no undo in the app, though a backup may still hold a copy."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
