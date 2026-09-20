@@ -32,10 +32,24 @@ Read the three verdicts it prints:
       `accepted` once notarized. If it says `revoked`, stop. That is the
       Malware Blocked dialog nobody can click past, and it means the build
       went out unsigned.
-- [ ] Commit the refreshed `Postit.app/` with the code and push. The zip on
-      the release and the app in the repo must be the same build.
+- [ ] Commit the refreshed `Postit.app/` **and `SHIPPED.json`** with the code,
+      then push. The zip on the release and the app in the repo must be the
+      same build.
 
-## 4. It survives being downloaded
+## 4. The committed app matches the committed source
+
+```sh
+./Swift/verify-tracked-app.sh
+```
+
+- [ ] Exits 0. It compares `Postit.app`'s binary against the digest in
+      `SHIPPED.json` and checks that `Swift/main.swift` has not moved on since
+      that build. This is the one check that catches the quiet failure plain
+      `./build.sh` creates: it never touches the tracked app, so the repo can
+      ship a binary several commits behind the source with nothing to say so.
+      Run it after the commit in step 3, on a clean tree.
+
+## 5. It survives being downloaded
 
 - [ ] Open <https://github.com/MaxOLeary/postit/releases/latest/download/Postit.zip>
       in Safari, unzip, double-click it once.

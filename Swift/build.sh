@@ -120,6 +120,25 @@ refresh_root() {
     rm -rf "../$APP"
     cp -R "$STAGE/$APP" "../$APP"
     echo "Refreshed ../$APP"
+
+    # Bind the committed app to the source it was built from. Without this the
+    # tracked bundle drifts silently: plain ./build.sh leaves it alone, so the
+    # repo can ship a binary several commits behind main.swift and nothing
+    # says so. verify-tracked-app.sh reads this back.
+    COMMIT="$(git -C .. rev-parse HEAD 2>/dev/null || echo unknown)"
+    DIRTY=false
+    [ -n "$(git -C .. status --porcelain 2>/dev/null)" ] && DIRTY=true
+    DIGEST="$(shasum -a 256 "../$APP/Contents/MacOS/Postit" | cut -d' ' -f1)"
+    cat > ../SHIPPED.json <<JSON
+{
+  "version": "$VERSION",
+  "source_commit": "$COMMIT",
+  "worktree_dirty": $DIRTY,
+  "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "binary_sha256": "$DIGEST"
+}
+JSON
+    echo "Wrote ../SHIPPED.json ($VERSION @ ${COMMIT:0:7})"
 }
 refresh_root
 
