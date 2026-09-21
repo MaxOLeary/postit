@@ -19,7 +19,7 @@
 // saved note so you can reopen (or delete) any. Zero runtime dependencies.
 //
 // ── File map ─────────────────────────────────────────────────────────────
-// One file on purpose: this plus PORTING.md (repo root) is the whole app.
+// One file on purpose: this is the whole app.
 // Sections, in order (jump by MARK):
 //
 //   Look & feel      Style — every color, size, font, and timing constant
@@ -37,10 +37,6 @@
 //   Manager          NotesManager — all open notes, drag-to-dock
 //                    conjoining, the menu-bar switcher
 //   App / Boot       AppDelegate + entry point
-//
-// Porting: PORTING.md specs the look, behaviors, and data format
-// platform-independently and maps each macOS-only API to an acceptable
-// substitute — start there before rebuilding this on another OS.
 
 import Cocoa
 
@@ -892,14 +888,19 @@ final class NoteStore {
 
     /// One-time import of the pre-multi-note single file (Postit/note.txt).
     /// Returns a note if that file exists with real content, and writes it out
-    /// as a proper JSON note so it becomes permanent. The original note.txt is
-    /// left in place as a backup — nothing is deleted.
+    /// as a proper JSON note so it becomes permanent. The original is renamed
+    /// to note.txt.bak so a later empty-store launch doesn't import it again.
     static func migrateLegacyNote() -> NoteData? {
         let legacy = dir.deletingLastPathComponent().appendingPathComponent("note.txt")
         guard let text = try? String(contentsOf: legacy, encoding: .utf8),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         let note = NoteData(id: UUID().uuidString, text: text)
         NoteStore(id: note.id).saveNow(note)
+        // Consume the original so deleting every note and relaunching doesn't
+        // mint a fresh UUID of the same text forever. Keep a backup beside it.
+        let bak = legacy.appendingPathExtension("bak")
+        try? FileManager.default.removeItem(at: bak)
+        try? FileManager.default.moveItem(at: legacy, to: bak)
         return note
     }
 
@@ -1005,6 +1006,7 @@ final class NoteStore {
                 NoteStore.ownerOnly(url)
             }
             self?.writeMirror(note)
+            NoteStore.remember(note.id)
         }
         pending = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
@@ -1019,6 +1021,7 @@ final class NoteStore {
             NoteStore.ownerOnly(url)
         }
         writeMirror(note)
+        NoteStore.remember(note.id)
     }
 
     /// Launch cleanup: a blank note's file should never outlive its window,
@@ -1029,16 +1032,58 @@ final class NoteStore {
             guard let data = try? Data(contentsOf: url),
                   let note = try? JSONDecoder().decode(NoteData.self, from: data),
                   note.isBlank else { continue }
-            NoteStore(id: note.id).delete()
+            NoteStore(id: note.id).delete(forgetOrder: true)
         }
     }
 
     /// Remove the file (used when an empty note is closed).
-    func delete() {
+    /// `forgetOrder` drops the id from the drawer list — only for a real
+    /// delete (switcher, merge, blank sweep), not for a note that was emptied
+    /// and might be typed into again.
+    func delete(forgetOrder: Bool = false) {
         pending?.cancel()
         pending = nil
         try? FileManager.default.removeItem(at: url)
         deleteMirror()
+        if forgetOrder { NoteStore.forget(id) }
+    }
+
+    // MARK: drawer / menu order
+
+    /// Shared with NotesManager. Atomic saves replace the file, which gives it
+    /// a new creation date, so the fallback "oldest first" sort would reshuffle
+    /// the list on every edit until the user dragged a row once. Remember ids
+    /// here so that order freezes the first time a note is written.
+    fileprivate static let orderKey = "NoteOrder"
+
+    fileprivate static func remember(_ id: String) {
+        var order = UserDefaults.standard.stringArray(forKey: orderKey) ?? []
+        if order.isEmpty {
+            order = loadHeads().map(\.id)
+            if !order.contains(id) { order.append(id) }
+            UserDefaults.standard.set(order, forKey: orderKey)
+        } else if !order.contains(id) {
+            order.append(id)
+            UserDefaults.standard.set(order, forKey: orderKey)
+        }
+    }
+
+    fileprivate static func forget(_ id: String) {
+        guard var order = UserDefaults.standard.stringArray(forKey: orderKey),
+              order.contains(id) else { return }
+        order.removeAll { $0 == id }
+        UserDefaults.standard.set(order, forKey: orderKey)
+    }
+
+    /// Freeze the current file order into NoteOrder if the user has never
+    /// dragged a row. Must run at launch, before an edit's atomic write
+    /// changes a note's creation date and reshuffles the list.
+    fileprivate static func seedOrderIfNeeded() {
+        let existing = UserDefaults.standard.stringArray(forKey: orderKey) ?? []
+        guard existing.isEmpty else { return }
+        let ids = loadHeads().map(\.id)
+        guard !ids.isEmpty else { return }
+        UserDefaults.standard.set(ids, forKey: orderKey)
     }
 }
 
@@ -1739,7 +1784,8 @@ enum MathEngine {
         add(1, 1e-6,           "mg", ["mg"])
         add(1, 0.001,          "g",  ["g", "gram", "grams"])
         add(1, 1,              "kg", ["kg", "kilogram", "kilograms", "kilo", "kilos"])
-        add(1, 1000,           "t",  ["t", "tonne", "tonnes", "ton", "tons"])
+        add(1, 1000,           "t",  ["t", "tonne", "tonnes"])
+        add(1, 907.18474,      "ton", ["ton", "tons"])   // US short ton; tonne stays metric
         add(1, 0.028349523125, "oz", ["oz", "ounce", "ounces"])
         add(1, 0.45359237,     "lb", ["lb", "lbs", "pound", "pounds"])
         add(1, 6.35029318,     "st", ["st", "stone", "stones"])
@@ -2111,6 +2157,8 @@ final class GrowingTextView: NSTextView {
     // RTF, undo, or the pasteboard.
     private var mathResults: [MathEngine.LineResult] = []
 
+    deinit { NotificationCenter.default.removeObserver(self) }
+
     override var intrinsicContentSize: NSSize {
         guard let lm = layoutManager, let tc = textContainer else {
             return NSSize(width: NSView.noIntrinsicMetric, height: 20)
@@ -2305,6 +2353,20 @@ final class GrowingTextView: NSTextView {
             textStorage?.addAttribute(.font, value: base, range: whole)
             textStorage?.addAttribute(.foregroundColor, value: Style.textColor, range: whole)
         }
+        invalidateIntrinsicContentSize()
+        refreshMath()
+        refreshChecklistLook()
+    }
+
+    /// Direct textStorage mutation (split, wrap, merge, setBody) skips
+    /// didChangeText, so checklists and :math have to be rebuilt by hand —
+    /// the same work load() already does.
+    func applyContents(_ attr: NSAttributedString) {
+        textStorage?.setAttributedString(attr)
+        contentsChanged()
+    }
+
+    func contentsChanged() {
         invalidateIntrinsicContentSize()
         refreshMath()
         refreshChecklistLook()
@@ -2857,8 +2919,7 @@ final class SectionView: NSView, NSTextFieldDelegate {
     /// Drop pre-existing rich text into the fold's body — used when a selection
     /// is lifted out of a text block and wrapped in a brand-new section.
     func setBody(_ attr: NSAttributedString) {
-        body.textStorage?.setAttributedString(attr)
-        body.invalidateIntrinsicContentSize()
+        body.applyContents(attr)
     }
 
     /// Serialize back to a Block for saving.
@@ -3720,10 +3781,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             window.center()
         }
         window.makeKeyAndOrderFront(nil)
-        if let first = firstTextView() {
-            window.makeFirstResponder(first)
-            activeText = first
-        }
+        focusLeadingBlock()
         applyTint(focused: window.isKeyWindow)
 
         // Watch every text-view selection change to catch the window's field
@@ -3996,9 +4054,8 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         growToFitColumns()
         layoutColumns()
         showDockGlow(nil)
-        if let tv = fresh.first.flatMap({ blockViews(in: $0).first?.primaryTextView }) {
-            window.makeFirstResponder(tv)
-            activeText = tv
+        if let first = fresh.first.flatMap({ blockViews(in: $0).first }) {
+            focusBlock(first)
         }
         saveDebounced()
     }
@@ -4127,6 +4184,27 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         columns.first.flatMap { blockViews(in: $0).first?.primaryTextView }
     }
 
+    /// Put the caret in a block the user can actually type in. A collapsed
+    /// section's body is hidden, so the title takes focus instead — otherwise
+    /// keystrokes vanish into a view that isn't on screen.
+    private func focusBlock(_ block: BlockView, atEnd: Bool = false) {
+        if let sv = block as? SectionView, sv.isCollapsed {
+            sv.focusTitle()
+            return
+        }
+        let tv = block.primaryTextView
+        if atEnd {
+            tv.setSelectedRange(NSRange(location: (tv.string as NSString).length, length: 0))
+        }
+        window.makeFirstResponder(tv)
+        activeText = tv
+    }
+
+    private func focusLeadingBlock() {
+        guard let first = columns.first.flatMap({ blockViews(in: $0).first }) else { return }
+        focusBlock(first)
+    }
+
     /// The switcher summary: each column's first section title or non-empty
     /// text line, joined across a conjoined note's columns.
     private func currentSummary() -> String {
@@ -4134,11 +4212,15 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             .joined(separator: " · ")
     }
 
-    // Empty notes skip the debounced write too — moving or resizing a note
-    // you never typed in shouldn't mint an "Untitled" file.
+    // Empty notes delete immediately — skipping the write left the previous
+    // JSON on disk, so select-all → delete → force quit restored the old body.
     private func saveDebounced() {
+        if isEmpty {
+            store.delete()
+            return
+        }
         store.scheduleSave { [weak self] in
-            guard let self, !self.isEmpty else { return nil }
+            guard let self, !self.discarding, !self.isEmpty else { return nil }
             return self.snapshot()
         }
     }
@@ -4222,7 +4304,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             afterAttr = ts.attributedSubstring(from: afterRange)
             if afterRange.length > 0 {
                 ts.deleteCharacters(in: afterRange)   // trim to text before cursor
-                tv.invalidateIntrinsicContentSize()
+                tv.contentsChanged()
             }
         } else {
             afterAttr = NSAttributedString(string: "")
@@ -4232,8 +4314,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         // empty, giving you a fresh line to type under the fold).
         let afterView = GrowingTextView.make(delegate: self, fontSize: fontSize)
         if afterAttr.length > 0 {
-            afterView.textStorage?.setAttributedString(afterAttr)
-            afterView.invalidateIntrinsicContentSize()
+            afterView.applyContents(afterAttr)
         }
         insertBlockView(afterView, at: index + 1, in: col)
         // The section slots in between, pushing the carried text below it.
@@ -4260,13 +4341,12 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         let tailRange = NSRange(location: selRange.location, length: ts.length - selRange.location)
         if tailRange.length > 0 {
             ts.deleteCharacters(in: tailRange)
-            tv.invalidateIntrinsicContentSize()
+            tv.contentsChanged()
         }
 
         let afterView = GrowingTextView.make(delegate: self, fontSize: fontSize)
         if afterAttr.length > 0 {
-            afterView.textStorage?.setAttributedString(afterAttr)
-            afterView.invalidateIntrinsicContentSize()
+            afterView.applyContents(afterAttr)
         }
         insertBlockView(afterView, at: index + 1, in: col)
 
@@ -4578,12 +4658,11 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             let tail = ts.attributedSubstring(from: tailRange)
             if tailRange.length > 0 {
                 ts.deleteCharacters(in: tailRange)
-                split.tv.invalidateIntrinsicContentSize()
+                split.tv.contentsChanged()
             }
             let tailView = GrowingTextView.make(delegate: self, fontSize: fontSize)
             if tail.length > 0 {
-                tailView.textStorage?.setAttributedString(tail)
-                tailView.invalidateIntrinsicContentSize()
+                tailView.applyContents(tail)
             }
             insertBlockView(tailView, at: index, in: target)   // the section slots in above it
             index = min(index, target.stack.arrangedSubviews.count)
@@ -5088,7 +5167,11 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     func focus() {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        if let tv = activeText ?? firstTextView() { window.makeFirstResponder(tv) }
+        if let tv = activeText, tv.window != nil, !tv.isHidden {
+            window.makeFirstResponder(tv)
+        } else {
+            focusLeadingBlock()
+        }
     }
 
     // MARK: text delegate (typing shortcuts, auto-cap, ink)
@@ -5584,7 +5667,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             let joinAt = (prevTV.string as NSString).length
             prevTV.textStorage?.append(
                 ts.attributedSubstring(from: NSRange(location: 0, length: ts.length)))
-            prevTV.invalidateIntrinsicContentSize()
+            prevTV.contentsChanged()
             removeBlockView(tv)
             prevTV.setSelectedRange(NSRange(location: joinAt, length: 0))
             window.makeFirstResponder(prevTV)
@@ -5608,13 +5691,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     /// Put the cursor at the end of a block — a collapsed section takes focus
     /// on its title instead (its body view is hidden).
     private func focusEnd(of block: BlockView) {
-        if let sv = block as? SectionView, sv.isCollapsed {
-            sv.focusTitle()
-            return
-        }
-        let tv = block.primaryTextView
-        tv.setSelectedRange(NSRange(location: (tv.string as NSString).length, length: 0))
-        window.makeFirstResponder(tv)
+        focusBlock(block, atEnd: true)
     }
 
     /// Selecting text copies it, TUI-style — no Cmd+C. Empty selections
@@ -5765,31 +5842,39 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         // When discarding (deleted from the switcher), skip saving entirely —
         // the manager removes the file. Otherwise: empty notes leave no trace,
         // real ones flush to disk.
+        // Drop undo targets first: registerUndo(withTarget:) retains this
+        // controller, so a closed note that had deleted/moved a section would
+        // otherwise leak (and its pending save could rewrite a deleted file).
+        window.undoManager?.removeAllActions()
         if discarding {
             manager?.controllerDidClose(self)
             return
         }
-        persist()
+        persist(closing: true)
         manager?.controllerDidClose(self)
     }
 
     /// The one rule every save path shares: a note with real content flushes
     /// to disk, an empty one leaves no file behind (deleting any file it
-    /// wrote earlier).
-    private func persist() {
-        if isEmpty { store.delete() } else { store.saveNow(snapshot()) }
+    /// wrote earlier). Closing/quitting also drops it from the drawer order.
+    private func persist(closing: Bool = false) {
+        if isEmpty { store.delete(forgetOrder: closing) } else { store.saveNow(snapshot()) }
     }
 
     /// Close this note's window without saving — used when the note is being
     /// deleted, so `windowWillClose` doesn't rewrite the file we're removing.
     func discard() {
         discarding = true
+        // Cancel any debounced write and unlink now. deleteNote / commitMerge
+        // used to call NoteStore(id:).delete() on a *fresh* store, which left
+        // this instance's pending snapshot free to resurrect the file.
+        store.delete(forgetOrder: true)
         window.close()
     }
 
     /// Called on app quit — same rule as closing: an empty note leaves no
     /// file behind, a real one flushes to disk.
-    func flush() { persist() }
+    func flush() { persist(closing: true) }
 }
 
 // MARK: - Manager
@@ -5829,6 +5914,7 @@ final class NotesManager: NSObject, NSMenuDelegate {
         } else {
             newNote()
         }
+        NoteStore.seedOrderIfNeeded()
     }
 
     /// The frontmost visible note whose window is under `screenPoint` — how a
@@ -5923,10 +6009,10 @@ final class NotesManager: NSObject, NSMenuDelegate {
     private func commitMerge(dragged: NoteController, into target: NoteController, side: DockSide) {
         let cols = dragged.snapshotColumns()
         let widths = dragged.columnWidths()
-        dragged.discard()                       // close without saving
-        NoteStore(id: dragged.id).delete()      // its content lives in target now
+        dragged.discard()                       // close without saving, unlink
         target.adoptColumns(cols, on: side, arriving: widths)
         target.focus()
+        controllers.forEach { $0.refreshDrawer() }
     }
 
     /// A column torn out of a conjoined note becomes its own note under the
@@ -6107,15 +6193,14 @@ final class NotesManager: NSObject, NSMenuDelegate {
 
     // MARK: note order (drawer)
 
-    private static let orderKey = "NoteOrder"
-
     /// Every saved note in the user's order: the saved id list first (ids
     /// whose file is gone are dropped), then anything new at the bottom in
     /// creation order. Never auto-sorted by edit time - notes stay where you
-    /// put them.
+    /// put them. NoteStore.remember seeds this list on first save so atomic
+    /// writes (which mint a new creation date) can't reshuffle it.
     private func orderedHeads() -> [(id: String, title: String)] {
         let heads = NoteStore.loadHeads()
-        let saved = UserDefaults.standard.stringArray(forKey: Self.orderKey) ?? []
+        let saved = UserDefaults.standard.stringArray(forKey: NoteStore.orderKey) ?? []
         let byID = Dictionary(heads.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var out: [(id: String, title: String)] = []
         var seen = Set<String>()
@@ -6133,7 +6218,7 @@ final class NotesManager: NSObject, NSMenuDelegate {
     /// A row was dragged to a new slot: persist the full order and refresh
     /// every open drawer so they all agree.
     func setNoteOrder(_ ids: [String]) {
-        UserDefaults.standard.set(ids, forKey: Self.orderKey)
+        UserDefaults.standard.set(ids, forKey: NoteStore.orderKey)
         controllers.forEach { $0.refreshDrawer() }
     }
 
@@ -6165,7 +6250,7 @@ final class NotesManager: NSObject, NSMenuDelegate {
     /// its file from disk.
     private func deleteNote(id: String) {
         if let c = controllers.first(where: { $0.id == id }) { c.discard() }
-        NoteStore(id: id).delete()
+        NoteStore(id: id).delete(forgetOrder: true)
         controllers.forEach { $0.refreshDrawer() }
     }
 
