@@ -69,10 +69,12 @@ as a new sticky. Without Whisper the bubble stays hidden.
 | `[] ` at the start of a line | checkbox (click it to tick it off) |
 | Cmd+Shift+L / Cmd+Shift+D | checklist on/off / mark done |
 | Cmd+= / Cmd+- | bigger / smaller text |
+| Cmd+N / Cmd+T | new note |
+| Cmd+W | close this note (it stays saved) |
+| Cmd+S | show or hide the sidebar |
 | `:math` on its own line | calculator (`:end` stops it) |
 
-Standard ones work as expected: Cmd+N new note, Cmd+W close, Cmd+Z undo,
-Cmd+Q quit. The welcome note on first launch walks through all of this.
+Cmd+Z undoes, Cmd+Q quits. The welcome note on first launch walks through all of this.
 
 ## For developers
 

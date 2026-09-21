@@ -1287,8 +1287,9 @@ enum WelcomeNote {
                 ("""
                  Cmd+Shift+L / Cmd+Shift+D   checklist on / off, mark done
                  Cmd+= / Cmd+-   bigger / smaller text (Shift+↑/↓ does it at the cursor)
-                 Cmd+N   new note
+                 Cmd+N / Cmd+T   new note
                  Cmd+W   close this note (it stays saved)
+                 Cmd+S   show or hide the sidebar
                  Cmd+Z / Cmd+Shift+Z   undo / redo
                  Cmd+Q   quit
                  """, nil),
@@ -3215,7 +3216,7 @@ private final class NoteDrawer: NSView {
         let plus = chromeSymbolButton("plus", point: 10, target: self, action: #selector(newTapped))
         plus.frame = NSRect(x: frame.width - 28, y: frame.height - 26, width: 18, height: 18)
         plus.autoresizingMask = [.minYMargin, .minXMargin]
-        plus.toolTip = "New note"
+        plus.toolTip = "New note (Cmd+T)"
         clip.addSubview(plus)
 
         scroll.frame = NSRect(x: 0, y: 8, width: frame.width, height: frame.height - 38)
@@ -3498,7 +3499,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         plus.autoresizingMask = [.maxXMargin, .minYMargin]
         plus.target = self
         plus.action = #selector(newNote)
-        plus.toolTip = "New note"
+        plus.toolTip = "New note (Cmd+T)"
         strip.addSubview(plus)
 
         // insert-section — a right-facing chevron that splits the text at the
@@ -3593,7 +3594,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         close.autoresizingMask = [.minXMargin, .minYMargin]
         close.target = self
         close.action = #selector(closeNote)
-        close.toolTip = "Close note"
+        close.toolTip = "Close note (Cmd+W)"
         strip.addSubview(close)
 
         container.addSubview(strip)
@@ -3626,7 +3627,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         drawerTab = DrawerTab(frame: NSRect(x: 2, y: (contentRect.height - tabH) / 2 + Style.padding,
                                             width: 10, height: tabH))
         drawerTab.autoresizingMask = [.minYMargin, .maxYMargin, .maxXMargin]
-        drawerTab.toolTip = "Show all notes"
+        drawerTab.toolTip = "Show all notes (Cmd+S)"
         drawerTab.onTap = { [weak self] in self?.toggleDrawer() }
         drawerTab.onDrag = { [weak self] dx in
             guard let self, self.drawerOpen else { return }
@@ -4813,7 +4814,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             guard let self, !self.drawerOpen else { return }
             self.drawer.isHidden = true
         })
-        drawerTab.toolTip = open ? "Hide the note list" : "Show all notes"
+        drawerTab.toolTip = open ? "Hide the note list (Cmd+S)" : "Show all notes (Cmd+S)"
     }
 
     /// Drop the swatch column out of the strip, or tuck it back up.
@@ -5053,6 +5054,28 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     }
 
     @objc private func closeNote() { window.close() }
+
+    /// Cmd+W. A borderless window has no close button, so the stock
+    /// performClose: only beeps. Close the same way the ✕ button does.
+    /// Key-repeat is ignored so holding the keys can't walk through every note.
+    @objc func closeFromMenu(_ sender: Any?) {
+        if let e = NSApp.currentEvent, e.type == .keyDown, e.isARepeat { return }
+        window.close()
+    }
+
+    /// Cmd+S. The left-edge note list. Checkmark tracks whether it's open.
+    @objc func toggleSidebar(_ sender: Any?) {
+        if let e = NSApp.currentEvent, e.type == .keyDown, e.isARepeat { return }
+        setDrawer(open: !drawerOpen)
+    }
+
+    @objc func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleSidebar(_:)) {
+            menuItem.title = drawerOpen ? "Hide Sidebar" : "Show Sidebar"
+            menuItem.state = drawerOpen ? .on : .off
+        }
+        return true
+    }
 
     /// True when nothing has been typed in any block (no text, no section title).
     /// Equivalent to "no block contributes a summary line."
@@ -6218,8 +6241,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CurrencyRates.shared.refreshIfStale()   // for :math currency lines
     }
 
-    /// Cmd+N from the main menu (reaches here via the responder chain).
-    @objc func newNote(_ sender: Any?) { notes.newNote() }
+    /// Cmd+N from the menu, and Cmd+T from the key monitor below.
+    @objc func newNote(_ sender: Any?) {
+        if let e = NSApp.currentEvent, e.type == .keyDown, e.isARepeat { return }
+        notes.newNote()
+    }
 
     /// The app boots as `.accessory` (menu-bar icon, no Dock tile), but an
     /// accessory app that becomes frontmost owns a menu bar it can't draw:
@@ -6285,6 +6311,9 @@ private func makeMainMenu() -> NSMenu {
     let appMenu = NSMenu()
     // nil target → travels the responder chain to the app delegate.
     appMenu.addItem(withTitle: "New Note", action: #selector(AppDelegate.newNote(_:)), keyEquivalent: "n")
+    // Cmd+T is the other "open a note", same action. A second row would just
+    // repeat the title, so the monitor below catches T and this row shows N.
+    appMenu.addItem(withTitle: "Show Sidebar", action: #selector(NoteController.toggleSidebar(_:)), keyEquivalent: "s")
     appMenu.addItem(.separator())
     appMenu.addItem(withTitle: "Quit Postit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
     appItem.submenu = appMenu
@@ -6308,7 +6337,7 @@ private func makeMainMenu() -> NSMenu {
     editMenu.addItem(withTitle: "Checklist", action: #selector(NoteController.toggleChecklist(_:)), keyEquivalent: "L")
     editMenu.addItem(withTitle: "Mark Done", action: #selector(NoteController.toggleDone(_:)),      keyEquivalent: "D")
     editMenu.addItem(.separator())
-    editMenu.addItem(withTitle: "Close",      action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+    editMenu.addItem(withTitle: "Close", action: #selector(NoteController.closeFromMenu(_:)), keyEquivalent: "w")
     editItem.submenu = editMenu
     menu.addItem(editItem)
 
@@ -6325,4 +6354,32 @@ app.setActivationPolicy(.accessory)   // menu-bar icon only, no Dock tile
 let delegate = AppDelegate()
 app.delegate = delegate
 app.mainMenu = makeMainMenu()
+
+// Cmd+T / Cmd+S / Cmd+W. A menu key equivalent only fires when some object
+// in the responder chain implements it. The text view is first responder
+// and doesn't, so Cmd+S never reached the note. Handle the chord here,
+// before the text view sees it. Exact Command: Shift/Option/Control are a
+// different shortcut. A held key and the delete confirm don't fire it.
+NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+    let flags = event.modifierFlags
+    guard flags.contains(.command),
+          !flags.contains(.shift), !flags.contains(.option), !flags.contains(.control),
+          !event.isARepeat, NSApp.modalWindow == nil else { return event }
+    switch event.charactersIgnoringModifiers?.lowercased() {
+    case "t":
+        NSApp.sendAction(#selector(AppDelegate.newNote(_:)), to: nil, from: nil)
+        return nil
+    case "s":
+        guard let note = NSApp.keyWindow?.delegate as? NoteController else { return event }
+        note.toggleSidebar(nil)
+        return nil
+    case "w":
+        guard let note = NSApp.keyWindow?.delegate as? NoteController else { return event }
+        note.closeFromMenu(nil)
+        return nil
+    default:
+        return event
+    }
+}
+
 app.run()
