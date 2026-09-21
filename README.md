@@ -67,6 +67,7 @@ as a new sticky. Without Whisper the bubble stays hidden.
 | `##` | insert a section |
 | `- ` at the start of a line | bullet list |
 | `[] ` at the start of a line | checkbox (click it to tick it off) |
+| `---` then Enter | a horizontal line |
 | Cmd+Shift+L / Cmd+Shift+D | checklist on/off / mark done |
 | Cmd+= / Cmd+- | bigger / smaller text |
 | Cmd+N / Cmd+T | new note |

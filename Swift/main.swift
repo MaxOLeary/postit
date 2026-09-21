@@ -11,8 +11,8 @@
 // and a size button whose readout follows the cursor and whose hover drops a
 // menu of every size; on the right, the meeting bubble and ✕. Typing shortcuts: double-tap
 // a capital trigger (RR / GG / BB for ink, WW for white, ## for a section) and
-// both characters vanish, replaced by the action; Shift+↑/↓ steps the font
-// size at the cursor. A line reading ":math" turns the lines below it into a
+// both characters vanish, replaced by the action; "---" then Enter becomes a
+// horizontal line; Shift+↑/↓ steps the font size at the cursor. A line reading ":math" turns the lines below it into a
 // live calculator — arithmetic, unit and currency conversions, variables —
 // with answers painted in green (":end" stops it). Every note remembers its
 // blocks, font size, and position across launches. A menu-bar item lists every
@@ -79,6 +79,10 @@ private enum Style {
     // a drag just passing through should never conjoin.
     static let dockDwell: TimeInterval = 0.9
     static let separatorColor  = NSColor(calibratedWhite: 1.0, alpha: 0.14)
+    // Horizontal rule ("---" then Enter). White, strongest at the middle of
+    // the line and gone at the ends. 0.60 over the dark glass matches the
+    // hairline's peak (about #a1a1a1 on #191919).
+    static let rulePeakAlpha: CGFloat = 0.60
     // Dragging a section by its title: the section dims in place, a snapshot
     // of it follows the cursor, and a line marks where it will land.
     static let dragSourceAlpha: CGFloat = 0.28
@@ -699,8 +703,9 @@ struct NoteData: Codable {
         // Skip the math-mode marker lines so a note that opens with ":math"
         // titles from its first real line.
         let firstLine = raw.split(whereSeparator: { $0.isNewline }).first { line in
-            let t = line.trimmingCharacters(in: .whitespaces).lowercased()
-            return t != ":math" && t != ":end"
+            let t = line.trimmingCharacters(in: .whitespaces)
+            let lower = t.lowercased()
+            return lower != ":math" && lower != ":end" && !Rule.isMarkerLine(t)
         }.map(String.init) ?? ""
         let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty { return "Untitled note" }
@@ -951,7 +956,7 @@ final class NoteStore {
         note.resolvedColumns.map { col in
             col.compactMap { b -> String? in
                 let body = b.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    .components(separatedBy: "\n").map(Bullets.markdownLine).map(Checklist.markdownLine).joined(separator: "\n")
+                    .components(separatedBy: "\n").map(Bullets.markdownLine).map(Checklist.markdownLine).map(Rule.markdownLine).joined(separator: "\n")
                 guard b.kind == .section else { return body.isEmpty ? nil : body }
                 let title = b.title.trimmingCharacters(in: .whitespaces)
                 let head = "## \(title.isEmpty ? "Untitled section" : title)"
@@ -1146,6 +1151,87 @@ enum Checklist {
     }
 }
 
+/// A horizontal rule. Typing `---` on its own line and pressing Enter swaps
+/// the dashes for one marker character plus a short paragraph style. The
+/// layout manager hides the marker and paints the line; the character is
+/// what round-trips through RTF, undo, and the pasteboard.
+enum Rule {
+    /// BOX DRAWINGS LIGHT HORIZONTAL. One character, so one backspace removes
+    /// the whole rule. Not something anyone types.
+    static let marker: Character = "\u{2500}"
+    static let markerString = String(marker)
+    /// Glyph band. The stroke sits in the middle of this; the gaps sit above
+    /// and below so the line doesn't touch the text.
+    static let band: CGFloat = 8
+    static let gap: CGFloat = 10
+
+    static func isMarkerLine(_ paragraph: String) -> Bool {
+        paragraph.trimmingCharacters(in: .whitespacesAndNewlines) == markerString
+    }
+
+    static func paragraphStyle() -> NSParagraphStyle {
+        let ps = NSMutableParagraphStyle()
+        ps.minimumLineHeight = band
+        ps.maximumLineHeight = band
+        ps.paragraphSpacingBefore = gap
+        ps.paragraphSpacing = gap
+        return ps
+    }
+
+    /// A paragraph still carrying the rule's metrics after the marker is gone
+    /// (the style sticks to whatever replaced it). Those get reset.
+    static func hasRuleMetrics(_ ps: NSParagraphStyle?) -> Bool {
+        guard let ps else { return false }
+        return abs(ps.minimumLineHeight - band) < 0.2
+            && abs(ps.maximumLineHeight - band) < 0.2
+            && abs(ps.paragraphSpacingBefore - gap) < 0.2
+    }
+
+    static func enumerate(in ns: NSString, _ body: (NSRange) -> Void) {
+        let full = NSRange(location: 0, length: ns.length)
+        guard full.length > 0 else { return }
+        withoutActuallyEscaping(body) { body in
+            ns.enumerateSubstrings(in: full, options: [.byParagraphs, .substringNotRequired]) { _, _, para, _ in
+                if isMarkerLine(ns.substring(with: para)) { body(para) }
+            }
+        }
+    }
+
+    /// What Enter turns into a rule: three hyphens, or the single em dash
+    /// macOS smart-dashes substitutes for them.
+    static func isTriggerLine(_ paragraph: String) -> Bool {
+        let core = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
+        return core == "---" || core == "\u{2014}"
+    }
+
+    /// The marker line reads as a markdown rule in the mirror.
+    static func markdownLine(_ line: String) -> String {
+        isMarkerLine(line) ? "---" : line
+    }
+
+    /// 1pt white stroke, full width, linearly faded to nothing at each end.
+    static func draw(in rect: NSRect) {
+        guard rect.width > 1, rect.height > 0,
+              let ctx = NSGraphicsContext.current?.cgContext else { return }
+        let colors = [
+            NSColor.white.withAlphaComponent(0).cgColor,
+            NSColor.white.withAlphaComponent(Style.rulePeakAlpha).cgColor,
+            NSColor.white.withAlphaComponent(0).cgColor,
+        ] as CFArray
+        let locs: [CGFloat] = [0, 0.5, 1]
+        guard let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                        colors: colors, locations: locs) else { return }
+        ctx.saveGState()
+        ctx.addRect(rect)
+        ctx.clip()
+        ctx.drawLinearGradient(gradient,
+                               start: CGPoint(x: rect.minX, y: rect.midY),
+                               end: CGPoint(x: rect.maxX, y: rect.midY),
+                               options: [])
+        ctx.restoreGState()
+    }
+}
+
 // Box painting adapted from PasteList by Zhan Li (github.com/Zhan-Li/pastelist), MIT License.
 /// Paints a real checkbox where a paragraph starts with ☐ / ☑. The character
 /// stays in the text (its glyph is made transparent with a temporary
@@ -1195,6 +1281,33 @@ final class ChecklistLayoutManager: NSLayoutManager {
             rect.origin.x += origin.x
             rect.origin.y += origin.y
             Self.drawBox(in: rect, done: done)
+        }
+        drawRules(forGlyphRange: glyphsToShow, at: origin)
+    }
+
+    /// The marker glyph is clear (see `GrowingTextView.refreshRuleLook`).
+    /// Paint the stroke across the whole line, centered on the glyph band.
+    private func drawRules(forGlyphRange glyphsToShow: NSRange, at origin: NSPoint) {
+        guard let storage = textStorage else { return }
+        let chars = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
+        let ns = storage.string as NSString
+        guard ns.length > 0 else { return }
+        let scope = ns.paragraphRange(for: chars)
+        let scale = (firstTextView?.window?.backingScaleFactor
+                     ?? NSScreen.main?.backingScaleFactor) ?? 2
+        ns.enumerateSubstrings(in: scope, options: [.byParagraphs, .substringNotRequired]) { _, _, para, _ in
+            guard Rule.isMarkerLine(ns.substring(with: para)) else { return }
+            let marker = NSRange(location: para.location, length: 1)
+            let g = self.glyphRange(forCharacterRange: marker, actualCharacterRange: nil)
+            guard g.length > 0 else { return }
+            let frag = self.lineFragmentRect(forGlyphAt: g.location, effectiveRange: nil)
+            let used = self.lineFragmentUsedRect(forGlyphAt: g.location, effectiveRange: nil)
+            guard frag.width > 1, used.height > 0 else { return }
+            let h: CGFloat = 1
+            var y = (used.midY * scale).rounded() / scale
+            y = min(max(y, used.minY), max(used.minY, used.maxY - h))
+            Rule.draw(in: NSRect(x: frag.minX + origin.x, y: y + origin.y,
+                                 width: frag.width, height: h))
         }
     }
 }
@@ -1284,6 +1397,7 @@ enum WelcomeNote {
                 ("Shift + ##   a new section\n", nil),
                 ("- ␣   start a bullet list (Tab / Shift+Tab nest it, Enter on an empty bullet ends it)\n", nil),
                 ("[]␣   checkbox (click the box to tick it off)\n", nil),
+                ("--- then Enter   a horizontal line\n", nil),
                 ("""
                  Cmd+Shift+L / Cmd+Shift+D   checklist on / off, mark done
                  Cmd+= / Cmd+-   bigger / smaller text (Shift+↑/↓ does it at the cursor)
@@ -2125,6 +2239,8 @@ final class GrowingTextView: NSTextView {
         invalidateIntrinsicContentSize()
         refreshMath()
         refreshChecklistLook()
+        refreshRuleLook()
+        queueNormalizeRules()
     }
 
     // MARK: checklists (look + click)
@@ -2159,6 +2275,98 @@ final class GrowingTextView: NSTextView {
         }
         needsDisplay = true
         window?.invalidateCursorRects(for: self)
+    }
+
+    // MARK: horizontal rule
+
+    /// A paragraph that kept the rule's line metrics after the marker was
+    /// deleted gets those metrics taken off. The check is read-only; the edit
+    /// waits a turn so it isn't nested inside didChangeText.
+    private var ruleNormalizeQueued = false
+
+    private func queueNormalizeRules() {
+        guard !ruleNormalizeQueued, ruleMetricsNeedReset() else { return }
+        ruleNormalizeQueued = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.ruleNormalizeQueued = false
+            self.normalizeRules()
+        }
+    }
+
+    private func ruleMetricsNeedReset() -> Bool {
+        guard let ts = textStorage else { return false }
+        let ns = string as NSString
+        guard ns.length > 0 else { return false }
+        var found = false
+        ns.enumerateSubstrings(in: NSRange(location: 0, length: ns.length),
+                               options: [.byParagraphs, .substringNotRequired]) { _, _, para, stop in
+            guard para.length > 0,
+                  let ps = ts.attribute(.paragraphStyle, at: para.location, effectiveRange: nil) as? NSParagraphStyle,
+                  Rule.hasRuleMetrics(ps),
+                  !Rule.isMarkerLine(ns.substring(with: para)) else { return }
+            found = true
+            stop.pointee = true
+        }
+        return found
+    }
+
+    private func normalizeRules() {
+        guard let ts = textStorage else { return }
+        let ns = string as NSString
+        guard ns.length > 0 else { return }
+        var fixes: [NSRange] = []
+        ns.enumerateSubstrings(in: NSRange(location: 0, length: ns.length),
+                               options: [.byParagraphs, .substringNotRequired]) { _, _, para, _ in
+            guard para.length > 0,
+                  let ps = ts.attribute(.paragraphStyle, at: para.location, effectiveRange: nil) as? NSParagraphStyle,
+                  Rule.hasRuleMetrics(ps),
+                  !Rule.isMarkerLine(ns.substring(with: para)) else { return }
+            fixes.append(para)
+        }
+        guard !fixes.isEmpty else { return }
+        for r in fixes.reversed() {
+            guard shouldChangeText(in: r, replacementString: nil) else { continue }
+            ts.removeAttribute(.paragraphStyle, range: r)
+        }
+        didChangeText()
+    }
+
+    func refreshRuleLook() {
+        guard let lm = layoutManager else { return }
+        let ns = string as NSString
+        Rule.enumerate(in: ns) { para in
+            var body = para
+            if body.length > 0, ns.character(at: NSMaxRange(body) - 1) == 0x0A { body.length -= 1 }
+            guard body.length > 0 else { return }
+            lm.addTemporaryAttribute(.foregroundColor, value: NSColor.clear,
+                                     forCharacterRange: body)
+        }
+        needsDisplay = true
+    }
+
+    /// A click on the rule's band lands on the marker, so the line selects
+    /// as one thing instead of the caret falling through to the next line.
+    override func characterIndexForInsertion(at point: NSPoint) -> Int {
+        if let loc = ruleHit(at: point) { return loc }
+        return super.characterIndexForInsertion(at: point)
+    }
+
+    private func ruleHit(at point: NSPoint) -> Int? {
+        guard let lm = layoutManager, let tc = textContainer else { return nil }
+        let ns = string as NSString
+        guard ns.length > 0 else { return nil }
+        lm.ensureLayout(for: tc)
+        let p = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
+        var found: Int?
+        Rule.enumerate(in: ns) { para in
+            let marker = NSRange(location: para.location, length: 1)
+            let g = lm.glyphRange(forCharacterRange: marker, actualCharacterRange: nil)
+            guard g.length > 0 else { return }
+            let frag = lm.lineFragmentRect(forGlyphAt: g.location, effectiveRange: nil)
+            if p.y >= frag.minY && p.y < frag.maxY { found = para.location }
+        }
+        return found
     }
 
     /// The box under `point` (view coordinates), as the range of its marker
@@ -2272,6 +2480,9 @@ final class GrowingTextView: NSTextView {
         // No system text replacement — it's what turns a double-space into a
         // period (sentence capitalization is done in the controller instead).
         tv.isAutomaticTextReplacementEnabled = false
+        // Smart dashes rewrite "---" into an em dash a beat after the third
+        // hyphen, so Enter never sees the rule trigger. Leave the hyphens.
+        tv.isAutomaticDashSubstitutionEnabled = false
         // Touching `layoutManager` first pins the view to TextKit 1 (the rest of
         // this class already depends on it), then the checklist painter goes in.
         _ = tv.layoutManager
@@ -2308,6 +2519,7 @@ final class GrowingTextView: NSTextView {
         invalidateIntrinsicContentSize()
         refreshMath()
         refreshChecklistLook()
+        refreshRuleLook()
     }
 
     /// The current content as base64 RTF (keeps per-range fonts).
@@ -5107,6 +5319,26 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         if applyingCaseFix { return true }
         textView.typingAttributes[.font] = currentFont
         textView.typingAttributes[.foregroundColor] = ink ?? Style.textColor
+        // The rule's newline carries the short line metrics. A character typed
+        // on the next line has to start a normal paragraph, or that line
+        // comes out 8pt tall.
+        if affectedCharRange.length == 0, affectedCharRange.location > 0,
+           let storage = textView.textStorage, storage.length > 0 {
+            let s = storage.string as NSString
+            let prevAt = min(affectedCharRange.location, s.length) - 1
+            let prevPara = s.paragraphRange(for: NSRange(location: prevAt, length: 0))
+            if Rule.isMarkerLine(s.substring(with: prevPara)),
+               affectedCharRange.location == NSMaxRange(prevPara) {
+                textView.typingAttributes[.paragraphStyle] = NSParagraphStyle.default
+            }
+        }
+
+        // A keystroke aimed at the rule itself lands on the next line. The
+        // line is one object; typing into it would split the marker.
+        if let s = replacementString, !s.isEmpty, affectedCharRange.length == 0,
+           !textView.hasMarkedText(), redirectTypingOffRule(s, at: affectedCharRange.location, in: textView) {
+            return false
+        }
 
         // Double-tap shortcuts: type the same trigger twice in a row (RR, GG,
         // BB, WW, ##) and both characters vanish, replaced by the action. The
@@ -5335,10 +5567,10 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         switch commandSelector {
         case #selector(NSResponder.deleteBackward(_:)):
-            return backspaceOutOfChecklist(textView) || backspaceOutOfBullet(textView)
-                || backspaceAcrossBlocks(textView)
+            return backspaceOutOfRule(textView) || backspaceOutOfChecklist(textView)
+                || backspaceOutOfBullet(textView) || backspaceAcrossBlocks(textView)
         case #selector(NSResponder.insertNewline(_:)):
-            return newlineInChecklist(textView) || newlineInBullet(textView)
+            return newlineOnRule(textView) || newlineInChecklist(textView) || newlineInBullet(textView)
         case #selector(NSResponder.insertTab(_:)):
             return onChecklistLine(textView) || nestBullet(textView, by: +1)
         case #selector(NSResponder.insertBacktab(_:)):
@@ -5346,6 +5578,130 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         default:
             return false
         }
+    }
+
+    // MARK: horizontal rule
+
+    /// Enter on a line that is exactly `---` turns it into a rule and leaves
+    /// the caret on the new line under it. Enter while sitting on a rule
+    /// opens another line below.
+    private func newlineOnRule(_ tv: NSTextView) -> Bool {
+        guard !tv.hasMarkedText(), let ts = tv.textStorage else { return false }
+        let sel = tv.selectedRange()
+        guard sel.length == 0 else { return false }
+        let s = tv.string as NSString
+        let para = paragraphRange(in: tv, at: min(sel.location, s.length))
+        let raw = s.substring(with: para)
+        let core = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if core == Rule.markerString { return insertLineAfter(para, in: tv) }
+        guard Rule.isTriggerLine(raw) else { return false }
+
+        let hadBreak = raw.hasSuffix("\n")
+        let markerLen = (Rule.markerString as NSString).length
+        let body = Rule.markerString + "\n" + (hadBreak ? "\n" : "")
+        let attr = NSMutableAttributedString(string: body, attributes: [
+            .font: currentFont,
+            .foregroundColor: ink ?? Style.textColor,
+        ])
+        attr.addAttribute(.paragraphStyle, value: Rule.paragraphStyle(),
+                          range: NSRange(location: 0, length: markerLen + 1))
+        applyingCaseFix = true
+        let allowed = tv.shouldChangeText(in: para, replacementString: body)
+        applyingCaseFix = false
+        guard allowed else { return true }
+        ts.replaceCharacters(in: para, with: attr)
+        tv.didChangeText()
+        tv.setSelectedRange(NSRange(location: para.location + markerLen + 1, length: 0))
+        tv.typingAttributes[.font] = currentFont
+        tv.typingAttributes[.foregroundColor] = ink ?? Style.textColor
+        tv.typingAttributes[.paragraphStyle] = NSParagraphStyle.default
+        saveDebounced()
+        return true
+    }
+
+    /// Put a plain newline just after the rule paragraph and sit the caret on it.
+    private func insertLineAfter(_ para: NSRange, in tv: NSTextView) -> Bool {
+        guard let ts = tv.textStorage else { return false }
+        let at = NSMaxRange(para)
+        let nl = NSAttributedString(string: "\n", attributes: [
+            .font: currentFont,
+            .foregroundColor: ink ?? Style.textColor,
+            .paragraphStyle: NSParagraphStyle.default,
+        ])
+        let r = NSRange(location: at, length: 0)
+        applyingCaseFix = true
+        let allowed = tv.shouldChangeText(in: r, replacementString: "\n")
+        applyingCaseFix = false
+        guard allowed else { return true }
+        ts.replaceCharacters(in: r, with: nl)
+        tv.didChangeText()
+        tv.setSelectedRange(NSRange(location: at, length: 0))
+        tv.typingAttributes[.font] = currentFont
+        tv.typingAttributes[.foregroundColor] = ink ?? Style.textColor
+        tv.typingAttributes[.paragraphStyle] = NSParagraphStyle.default
+        saveDebounced()
+        return true
+    }
+
+    /// Backspace on the rule, or at the start of the line right under it,
+    /// removes the whole rule.
+    private func backspaceOutOfRule(_ tv: NSTextView) -> Bool {
+        let sel = tv.selectedRange()
+        guard sel.length == 0, tv.textStorage != nil else { return false }
+        let s = tv.string as NSString
+        guard s.length > 0 else { return false }
+        let loc = min(sel.location, s.length)
+        let para = paragraphRange(in: tv, at: loc)
+        if Rule.isMarkerLine(s.substring(with: para)) {
+            return deleteParagraph(para, in: tv)
+        }
+        if loc == para.location, para.location > 0 {
+            let prev = paragraphRange(in: tv, at: para.location - 1)
+            if Rule.isMarkerLine(s.substring(with: prev)) {
+                return deleteParagraph(prev, in: tv)
+            }
+        }
+        return false
+    }
+
+    private func deleteParagraph(_ para: NSRange, in tv: NSTextView) -> Bool {
+        guard let ts = tv.textStorage else { return false }
+        applyingCaseFix = true
+        let allowed = tv.shouldChangeText(in: para, replacementString: "")
+        applyingCaseFix = false
+        guard allowed else { return true }
+        ts.replaceCharacters(in: para, with: "")
+        tv.didChangeText()
+        let loc = min(para.location, (tv.string as NSString).length)
+        tv.setSelectedRange(NSRange(location: loc, length: 0))
+        saveDebounced()
+        return true
+    }
+
+    /// Insert `text` after the rule paragraph instead of into it. False when
+    /// the caret isn't on a rule.
+    private func redirectTypingOffRule(_ text: String, at location: Int, in tv: NSTextView) -> Bool {
+        guard let ts = tv.textStorage else { return false }
+        let s = tv.string as NSString
+        guard s.length > 0 else { return false }
+        let loc = min(location, s.length)
+        let para = paragraphRange(in: tv, at: loc)
+        guard Rule.isMarkerLine(s.substring(with: para)), location < NSMaxRange(para) else { return false }
+        let at = NSMaxRange(para)
+        var insert = text
+        if !s.substring(with: para).hasSuffix("\n") { insert = "\n" + text }
+        let attr = NSAttributedString(string: insert, attributes: [
+            .font: currentFont,
+            .foregroundColor: ink ?? Style.textColor,
+            .paragraphStyle: NSParagraphStyle.default,
+        ])
+        let r = NSRange(location: at, length: 0)
+        guard tv.shouldChangeText(in: r, replacementString: insert) else { return true }
+        ts.replaceCharacters(in: r, with: attr)
+        tv.didChangeText()
+        tv.setSelectedRange(NSRange(location: at + (insert as NSString).length, length: 0))
+        saveDebounced()
+        return true
     }
 
     // MARK: bullets
@@ -6348,6 +6704,7 @@ private func makeMainMenu() -> NSMenu {
 // per-view text-replacement flag doesn't cover it on every macOS build, and
 // an app-domain default beats the global System Settings pref.
 UserDefaults.standard.set(false, forKey: "NSAutomaticPeriodSubstitutionEnabled")
+UserDefaults.standard.set(false, forKey: "NSAutomaticDashSubstitutionEnabled")
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)   // menu-bar icon only, no Dock tile
