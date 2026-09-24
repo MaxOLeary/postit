@@ -751,6 +751,7 @@ struct NoteData: Codable {
     var blocks: [Block]? = nil                  // the block content model; nil on legacy notes
     var columns: [[Block]]? = nil               // conjoined multi-column body; nil == single column
     var columnWeights: [CGFloat]? = nil         // per-column width fractions (sum 1); nil == equal
+    var space: String? = nil                    // uuid of the desktop Space it sat on; nil == wherever
 
     /// The RTF payload decoded back to Data, if present.
     var rtfData: Data? { rtf.flatMap { Data(base64Encoded: $0) } }
@@ -2157,6 +2158,51 @@ final class CurrencyRates {
 /// Borderless window that can take key and main (AppKit defaults both to
 /// false for `.borderless`). Stays at the normal window level so notes stack
 /// with other apps instead of floating on top or dropping to the back.
+// MARK: - Spaces
+
+/// Which desktop Space a note sits on, so a relaunch puts it back there.
+/// macOS has no public API for this; these are the private CoreGraphics
+/// calls Mission Control tools use. Spaces are saved by uuid, since the
+/// numeric ids get reshuffled across logins. Any failure just leaves the
+/// note on the current Space.
+enum Spaces {
+    private typealias CID = Int32
+    @_silgen_name("CGSMainConnectionID")
+    private static func mainConnection() -> CID
+    @_silgen_name("CGSCopySpacesForWindows")
+    private static func copySpaces(_ c: CID, _ mask: Int32, _ wids: CFArray) -> Unmanaged<CFArray>?
+    @_silgen_name("CGSCopyManagedDisplaySpaces")
+    private static func copyDisplaySpaces(_ c: CID) -> Unmanaged<CFArray>?
+    @_silgen_name("CGSMoveWindowsToManagedSpace")
+    private static func moveWindows(_ c: CID, _ wids: CFArray, _ sid: Int)
+
+    /// Every user desktop Space as (numeric id, uuid), across all displays.
+    private static func all() -> [(id: Int, uuid: String)] {
+        guard let displays = copyDisplaySpaces(mainConnection())?.takeRetainedValue()
+                as? [[String: Any]] else { return [] }
+        return displays.flatMap { ($0["Spaces"] as? [[String: Any]]) ?? [] }.compactMap {
+            guard let id = $0["ManagedSpaceID"] as? Int, let uuid = $0["uuid"] as? String,
+                  !uuid.isEmpty else { return nil }
+            return (id, uuid)
+        }
+    }
+
+    /// The uuid of the one Space the window is on, or nil when it's on none
+    /// (not ordered in) or several (all-Spaces windows).
+    static func uuid(of window: NSWindow) -> String? {
+        guard window.windowNumber > 0,
+              let ids = copySpaces(mainConnection(), 7, [window.windowNumber] as CFArray)?
+                .takeRetainedValue() as? [Int], ids.count == 1 else { return nil }
+        return all().first { $0.id == ids[0] }?.uuid
+    }
+
+    static func move(_ window: NSWindow, to uuid: String) {
+        guard window.windowNumber > 0, let target = all().first(where: { $0.uuid == uuid }),
+              uuid != Spaces.uuid(of: window) else { return }
+        moveWindows(mainConnection(), [window.windowNumber] as CFArray, target.id)
+    }
+}
+
 final class GlassWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -2495,6 +2541,33 @@ final class GrowingTextView: NSTextView {
             r.origin.x += textContainerOrigin.x
             r.origin.y += textContainerOrigin.y
             addCursorRect(r.insetBy(dx: -2, dy: -2), cursor: .pointingHand)
+        }
+    }
+
+    /// NSTextView re-sets the I-beam on every mouse move, which beats the
+    /// cursor rects above, so the hand has to be re-asserted after it. The
+    /// extra tracking area makes sure moves reach this view even when the
+    /// note isn't the key window.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.filter { $0.owner === self && $0.userInfo?["box"] != nil }.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.mouseMoved, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: ["box": true]))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        if checklistBox(at: convert(event.locationInWindow, from: nil)) != nil {
+            NSCursor.pointingHand.set()
+        }
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if checklistBox(at: convert(event.locationInWindow, from: nil)) != nil {
+            NSCursor.pointingHand.set()
+        } else {
+            super.cursorUpdate(with: event)
         }
     }
 
@@ -4029,6 +4102,8 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             window.center()
         }
         window.makeKeyAndOrderFront(nil)
+        // Back onto the desktop it was on when it was saved.
+        if let space = data.space { Spaces.move(window, to: space) }
         if let first = firstTextView() {
             window.makeFirstResponder(first)
             activeText = first
@@ -4042,7 +4117,15 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(anySelectionChanged(_:)),
             name: NSTextView.didChangeSelectionNotification, object: nil)
+
+        // Dragging a note to another desktop in Mission Control doesn't move
+        // its frame, so a Space switch is the cue to re-save which one it's on.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(spaceChanged),
+            name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
     }
+
+    @objc private func spaceChanged() { saveDebounced() }
 
     deinit {
         copyToastHide?.cancel()
@@ -4052,6 +4135,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         if let mon = drawerEscMonitor { NSEvent.removeMonitor(mon) }
         if let mon = sizeMenuMonitor { NSEvent.removeMonitor(mon) }
         NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     /// Pull a saved frame back onto a screen, so a note can never restore to a
@@ -4977,7 +5061,8 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
                         frame: [f.origin.x, f.origin.y, f.size.width, f.size.height],
                         blocks: cols.count == 1 ? cols[0] : nil,
                         columns: cols.count == 1 ? nil : cols,
-                        columnWeights: cols.count == 1 ? nil : colWeights)
+                        columnWeights: cols.count == 1 ? nil : colWeights,
+                        space: Spaces.uuid(of: window))
     }
 
     private func applyTint(focused: Bool) {
