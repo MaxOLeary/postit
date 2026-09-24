@@ -258,6 +258,92 @@ private final class ClickThroughLabel: NSTextField {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
+/// Photoshop-style "Add Noise" (monochromatic) over the glass, under the text.
+/// One global amount, 0...1, set from the menu-bar slider; every open note
+/// listens for `didChange` and updates live.
+enum Grain {
+    static let key = "GrainAmount"
+    static let didChange = Notification.Name("PostitGrainDidChange")
+    /// Most opaque the grain gets with the slider all the way up.
+    static let maxOpacity: Float = 0.35
+
+    /// Max's pick, used until someone moves the slider.
+    static let defaultAmount = 0.17
+
+    static var amount: Double {
+        get { UserDefaults.standard.object(forKey: key) as? Double ?? defaultAmount }
+        set {
+            UserDefaults.standard.set(min(max(newValue, 0), 1), forKey: key)
+            NotificationCenter.default.post(name: didChange, object: nil)
+        }
+    }
+
+    /// A 256px tile of random grey specks at 2x, so one speck is one Retina
+    /// pixel. Each pixel is black or white at a random strength, so the grain
+    /// both darkens and lightens the glass the way Photoshop's does.
+    static let tile: NSImage = {
+        let px = 256
+        var bytes = [UInt8](repeating: 0, count: px * px * 4)
+        for i in 0..<(px * px) {
+            let a = UInt8.random(in: 0...255)
+            let v: UInt8 = Bool.random() ? a : 0     // premultiplied white or black
+            bytes[i * 4] = v; bytes[i * 4 + 1] = v; bytes[i * 4 + 2] = v
+            bytes[i * 4 + 3] = a
+        }
+        let cg = bytes.withUnsafeMutableBytes { buf -> CGImage in
+            let ctx = CGContext(data: buf.baseAddress, width: px, height: px,
+                                bitsPerComponent: 8, bytesPerRow: px * 4,
+                                space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            return ctx.makeImage()!
+        }
+        return NSImage(cgImage: cg, size: NSSize(width: px / 2, height: px / 2))
+    }()
+}
+
+/// The grain layer itself. Clicks fall through to the window so dragging
+/// the note by its background still works.
+private final class GrainView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor(patternImage: Grain.tile).cgColor
+        layer?.cornerRadius = Style.cornerRadius
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+        refresh()
+        NotificationCenter.default.addObserver(self, selector: #selector(refresh),
+                                               name: Grain.didChange, object: nil)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    @objc private func refresh() {
+        let a = Float(Grain.amount) * Grain.maxOpacity
+        layer?.opacity = a
+        isHidden = a == 0
+    }
+}
+
+/// Menu-bar row: "Grain" and a slider that drives `Grain.amount` live.
+private final class GrainSliderRow: NSView {
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 220, height: 28))
+        let label = NSTextField(labelWithString: "Grain")
+        label.font = .menuFont(ofSize: 0)
+        label.frame = NSRect(x: 14, y: 5, width: 50, height: 18)
+        addSubview(label)
+        let s = NSSlider(value: Grain.amount, minValue: 0, maxValue: 1,
+                         target: self, action: #selector(moved(_:)))
+        s.isContinuous = true
+        s.controlSize = .small
+        s.frame = NSRect(x: 64, y: 4, width: 142, height: 20)
+        addSubview(s)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    @objc private func moved(_ s: NSSlider) { Grain.amount = s.doubleValue }
+}
+
 /// The bare chassis every chrome control shares: borderless, momentary, and
 /// never stealing keyboard focus from the text.
 private func bareButton(frame: NSRect = .zero,
@@ -3417,6 +3503,12 @@ private final class NoteDrawer: NSView {
         }
         backing.autoresizingMask = [.width, .height]
         clip.addSubview(backing)
+        // Same grain as the note, over the drawer's glass but under its rows.
+        // `clip` already rounds the right corners, so the grain stays square.
+        let grain = GrainView(frame: clip.bounds)
+        grain.layer?.cornerRadius = 0
+        grain.autoresizingMask = [.width, .height]
+        clip.addSubview(grain)
 
         let header = NSTextField(labelWithString: "NOTES")
         header.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
@@ -3919,6 +4011,11 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         let root = NSView(frame: window.contentLayoutRect)
         root.autoresizesSubviews = true
         root.addSubview(glass)
+        // Grain sits between the glass and the UI: it speckles the note's
+        // surface but never the text or buttons stacked above it.
+        let grain = GrainView(frame: glass.frame)
+        grain.autoresizingMask = [.width, .height]
+        root.addSubview(grain)
         root.addSubview(container)
         window.contentView = root
         window.delegate = self
@@ -5275,6 +5372,13 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         window.close()
     }
 
+    /// Cmd+D. Delete this note, behind the same confirm dialog as the
+    /// sidebar's trash button. Key-repeat ignored so it can't stack dialogs.
+    @objc func deleteFromMenu(_ sender: Any?) {
+        if let e = NSApp.currentEvent, e.type == .keyDown, e.isARepeat { return }
+        manager?.confirmDelete(id: id, title: displayTitle)
+    }
+
     /// Cmd+S. The left-edge note list. Checkmark tracks whether it's open.
     @objc func toggleSidebar(_ sender: Any?) {
         if let e = NSApp.currentEvent, e.type == .keyDown, e.isARepeat { return }
@@ -6426,6 +6530,10 @@ final class NotesManager: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+        let grain = NSMenuItem()
+        grain.view = GrainSliderRow()
+        menu.addItem(grain)
+        menu.addItem(.separator())
         if whisperAppExists() {
             let start = NSMenuItem(title: "Start meeting",
                                    action: #selector(startMeetingClicked(_:)),
@@ -6693,6 +6801,7 @@ private func makeMainMenu() -> NSMenu {
     editMenu.addItem(withTitle: "Checklist", action: #selector(NoteController.toggleChecklist(_:)), keyEquivalent: "L")
     editMenu.addItem(withTitle: "Mark Done", action: #selector(NoteController.toggleDone(_:)),      keyEquivalent: "D")
     editMenu.addItem(.separator())
+    editMenu.addItem(withTitle: "Delete Note…", action: #selector(NoteController.deleteFromMenu(_:)), keyEquivalent: "d")
     editMenu.addItem(withTitle: "Close", action: #selector(NoteController.closeFromMenu(_:)), keyEquivalent: "w")
     editItem.submenu = editMenu
     menu.addItem(editItem)
