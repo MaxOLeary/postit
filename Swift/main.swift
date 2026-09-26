@@ -43,6 +43,7 @@
 // substitute — start there before rebuilding this on another OS.
 
 import Cocoa
+import CryptoKit
 
 // MARK: - Look & feel
 
@@ -138,6 +139,13 @@ private enum Style {
     static let inkDotGap:      CGFloat = 6
     static let panelHover      = NSColor(calibratedWhite: 1.0, alpha: 0.14)
     static let panelEdge       = NSColor(calibratedWhite: 1.0, alpha: 0.18)
+    // The note's glass edge (EdgeLightView): a hairline of caught light along
+    // the rim, and a soft shade that fades inward from it over `edgeShadeWidth`
+    // points. Both faint on purpose; they only have to keep a note's outline
+    // readable where it lies on top of another note.
+    static let edgeRim         = NSColor(calibratedWhite: 1.0, alpha: 0.10)
+    static let edgeShade       = NSColor(calibratedWhite: 0.0, alpha: 0.45)
+    static let edgeShadeWidth: CGFloat = 10
     static let idleTint       = NSColor(calibratedWhite: 0.16, alpha: 0.18)
     static let focusedTint    = NSColor(calibratedWhite: 0.85, alpha: 0.12)
     // Ink swatches — red, green, blue, the green matching the color :math
@@ -322,6 +330,69 @@ private final class GrainView: NSView {
         let a = Float(Grain.amount) * Grain.maxOpacity
         layer?.opacity = a
         isHidden = a == 0
+    }
+}
+
+/// The glass edge. Two stacked notes share one tint, so the front note's
+/// outline sinks into the one behind it; the window has no shadow and the
+/// glass's own edge spill is clipped away (it left blocks in the corner
+/// notches). This puts the edge back the way thick glass shows it: a 1pt
+/// hairline of light right at the rim, and a shade that bends inward from
+/// the edge and fades out over a few points. No stroke wider than a hair,
+/// nothing outside the note. Sits over the grain, under the UI; clicks fall
+/// through so dragging by the background still works.
+private final class EdgeLightView: NSView {
+    private let rim = CALayer()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+        layer?.cornerRadius = Style.cornerRadius
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+        // The hairline is a layer border so its corners follow the same
+        // continuous curve as the glass mask; a stroked CGPath is circular at
+        // the corners and drifts off the edge there.
+        rim.borderWidth = 1
+        rim.borderColor = Style.edgeRim.cgColor
+        rim.cornerRadius = Style.cornerRadius
+        rim.cornerCurve = .continuous
+        rim.frame = bounds
+        layer?.addSublayer(rim)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    // No mouseDownCanMoveWindow override here: it would mark the whole note
+    // (this view covers it) as a no-drag region, freezing the window in place.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        rim.frame = bounds
+        CATransaction.commit()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        let r = Style.cornerRadius
+        let w = Style.edgeShadeWidth
+        let shape = CGPath(roundedRect: bounds, cornerWidth: r, cornerHeight: r, transform: nil)
+        // Inner shade: fill everything *outside* the note's shape and let the
+        // fill's shadow spill inward. The clip throws the fill itself away and
+        // keeps only the spill, so the shade is darkest at the rim and gone
+        // `w` points in.
+        ctx.saveGState()
+        ctx.addPath(shape)
+        ctx.clip()
+        ctx.setShadow(offset: .zero, blur: w, color: Style.edgeShade.cgColor)
+        ctx.addRect(bounds.insetBy(dx: -w * 3, dy: -w * 3))
+        ctx.addPath(shape)
+        ctx.setFillColor(NSColor.black.cgColor)
+        ctx.fillPath(using: .evenOdd)
+        ctx.restoreGState()
     }
 }
 
@@ -737,8 +808,19 @@ struct Block: Codable {
     var collapsed: Bool = false     // section fold state (ignored for text blocks)
     var titleSize: CGFloat? = nil   // section header font size (nil = legacy default)
     var titleInk: String? = nil     // section header ink by swatch name (nil = white)
+    var images: [ImageRef]? = nil   // inline images, keyed by offset into the stripped body
 
     var rtfData: Data? { rtf.flatMap { Data(base64Encoded: $0) } }
+}
+
+/// One inline image in a block body. The image bytes live in ImageStore, not
+/// the note JSON. `at` is a UTF-16 offset into the block's saved `text`/`rtf`,
+/// which have the attachment characters taken out; `width` is the display
+/// width in points (drawn at min(width, line width), aspect kept).
+struct ImageRef: Codable, Equatable {
+    var at: Int
+    var file: String
+    var width: CGFloat
 }
 
 /// The saved state of one note. Codable so it round-trips to a small JSON file.
@@ -782,13 +864,15 @@ struct NoteData: Codable {
             col.allSatisfy {
                 Bullets.isBlank($0.text)
                     && $0.title.trimmingCharacters(in: .whitespaces).isEmpty
+                    && ($0.images?.isEmpty ?? true)
             }
         }
     }
 
     static func title(from raw: String) -> String {
         // Skip the math-mode marker lines so a note that opens with ":math"
-        // titles from its first real line.
+        // titles from its first real line. Image placeholders never title.
+        let raw = raw.replacingOccurrences(of: ImageStore.placeholder, with: "")
         let firstLine = raw.split(whereSeparator: { $0.isNewline }).first { line in
             let t = line.trimmingCharacters(in: .whitespaces)
             let lower = t.lowercased()
@@ -2349,6 +2433,223 @@ protocol BlockView: NSView {
     func owns(_ tv: NSTextView) -> Bool
 }
 
+// MARK: - Images
+
+/// Image files for inline images, one per distinct image, named by the
+/// sha256 of their bytes so the same picture pasted twice is stored once.
+/// Kept out of the note JSON because that file is rewritten on every save.
+enum ImageStore {
+    /// The object replacement character an attachment occupies in the text.
+    static let placeholder = "\u{FFFC}"
+
+    static let dir: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory,
+                                            in: .userDomainMask).first!
+        let d = base.appendingPathComponent("Postit/images", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: d, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700],
+                                               ofItemAtPath: d.path)
+        return d
+    }()
+
+    static func url(for file: String) -> URL { dir.appendingPathComponent(file) }
+
+    /// Store image bytes and return the stored file name, or nil if the data
+    /// isn't an image. PNG, JPEG and GIF keep their bytes; anything else
+    /// NSBitmapImageRep can read (TIFF, HEIC, BMP...) is converted to PNG.
+    static func importImage(data: Data) -> String? {
+        let bytes: Data, ext: String
+        if let known = sniff(data) {
+            bytes = data; ext = known
+        } else if let rep = NSBitmapImageRep(data: data),
+                  let png = rep.representation(using: .png, properties: [:]) {
+            bytes = png; ext = "png"
+        } else {
+            return nil
+        }
+        let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let file = "\(hash).\(ext)"
+        let dest = url(for: file)
+        if !FileManager.default.fileExists(atPath: dest.path) {
+            do { try bytes.write(to: dest, options: .atomic) } catch { return nil }
+        }
+        NoteStore.ownerOnly(dest)
+        return file
+    }
+
+    static func importImage(url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return importImage(data: data)
+    }
+
+    /// Extension for the formats whose bytes are kept as-is, by magic number.
+    private static func sniff(_ d: Data) -> String? {
+        let b = [UInt8](d.prefix(8))
+        if b.starts(with: [0x89, 0x50, 0x4E, 0x47]) { return "png" }
+        if b.starts(with: [0xFF, 0xD8, 0xFF]) { return "jpg" }
+        if b.starts(with: [0x47, 0x49, 0x46, 0x38]) { return "gif" }
+        return nil
+    }
+
+    /// Decoded images, so layout and drawing don't hit the disk every pass.
+    private static let cache = NSCache<NSString, NSImage>()
+
+    static func image(for file: String) -> NSImage? {
+        if let hit = cache.object(forKey: file as NSString) { return hit }
+        guard let img = NSImage(contentsOf: url(for: file)), img.size.width > 0,
+              img.size.height > 0 else { return nil }
+        cache.setObject(img, forKey: file as NSString)
+        return img
+    }
+}
+
+/// An inline image in a note body. Carries the stored file name and display
+/// width; the cell does the layout and drawing.
+final class ImageAttachment: NSTextAttachment {
+    let file: String
+    var width: CGFloat
+
+    init(file: String, width: CGFloat) {
+        self.file = file
+        self.width = width
+        super.init(data: nil, ofType: nil)
+        attachmentCell = ImageAttachmentCell(attachment: self)
+    }
+
+    required init?(coder: NSCoder) { fatalError("ImageAttachment is never archived") }
+
+    /// A fresh attachment for a newly stored image: its natural width in
+    /// points, so it shows at note width, or smaller if the image is smaller.
+    static func fresh(file: String) -> ImageAttachment {
+        ImageAttachment(file: file, width: ImageStore.image(for: file)?.size.width ?? 200)
+    }
+}
+
+/// TextKit 1 cell for an ImageAttachment: sized to min(stored width, line
+/// width) with the aspect ratio kept, so a note resized narrower shrinks the
+/// image and widening it back grows it up to its stored width. A missing
+/// file draws a grey placeholder box instead.
+final class ImageAttachmentCell: NSTextAttachmentCell {
+    static let missingHeight: CGFloat = 48
+
+    init(attachment: ImageAttachment) {
+        super.init(imageCell: nil)
+        self.attachment = attachment
+    }
+
+    required init(coder: NSCoder) { fatalError("ImageAttachmentCell is never archived") }
+
+    private var imageAttachment: ImageAttachment? { attachment as? ImageAttachment }
+    private var storedImage: NSImage? { imageAttachment.flatMap { ImageStore.image(for: $0.file) } }
+
+    /// Display size inside `available` points of line width.
+    func displaySize(available: CGFloat) -> NSSize {
+        let stored = max(imageAttachment?.width ?? 200, 1)
+        let w = max(1, available > 1 ? min(stored, available) : stored).rounded(.down)
+        guard let img = storedImage else { return NSSize(width: w, height: Self.missingHeight) }
+        return NSSize(width: w, height: (w * img.size.height / img.size.width).rounded())
+    }
+
+    override func cellSize() -> NSSize { displaySize(available: 0) }
+    override func cellBaselineOffset() -> NSPoint { .zero }
+    override func wantsToTrackMouse() -> Bool { false }
+
+    override func cellFrame(for textContainer: NSTextContainer, proposedLineFragment lineFrag: NSRect,
+                            glyphPosition position: NSPoint, characterIndex charIndex: Int) -> NSRect {
+        let containerW = textContainer.size.width - textContainer.lineFragmentPadding * 2
+        var avail = lineFrag.width - textContainer.lineFragmentPadding * 2
+        if containerW > 1 { avail = min(avail, containerW) }
+        return NSRect(origin: .zero, size: displaySize(available: avail))
+    }
+
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView?) {
+        guard let img = storedImage else {
+            let box = NSBezierPath(roundedRect: cellFrame.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+            NSColor(white: 0.5, alpha: 0.25).setFill()
+            box.fill()
+            NSColor(white: 0.7, alpha: 0.6).setStroke()
+            box.stroke()
+            let label = NSAttributedString(string: "missing image", attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor(white: 0.85, alpha: 0.9),
+            ])
+            let s = label.size()
+            label.draw(at: NSPoint(x: cellFrame.midX - s.width / 2, y: cellFrame.midY - s.height / 2))
+            return
+        }
+        img.draw(in: cellFrame, from: .zero, operation: .sourceOver, fraction: 1,
+                 respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high.rawValue])
+    }
+
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView?,
+                       characterIndex charIndex: Int, layoutManager: NSLayoutManager) {
+        draw(withFrame: cellFrame, in: controlView)
+    }
+}
+
+/// Moving inline images between a live text storage and a saved Block.
+/// The saved text and RTF have the attachment characters stripped out; each
+/// image is an ImageRef whose `at` is a UTF-16 offset into that stripped text.
+enum ImageBody {
+    /// A copy of `attr` with every attachment character removed, plus a ref
+    /// for each ImageAttachment in ascending order. Attachments of any other
+    /// kind (none are created today) are dropped.
+    static func strip(_ attr: NSAttributedString) -> (NSAttributedString, [ImageRef]) {
+        var hits: [(Int, NSTextAttachment)] = []
+        let ns = attr.string as NSString
+        attr.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attr.length),
+                                options: []) { value, range, _ in
+            guard let a = value as? NSTextAttachment else { return }
+            for i in range.location..<NSMaxRange(range) where ns.character(at: i) == 0xFFFC {
+                hits.append((i, a))
+            }
+        }
+        guard !hits.isEmpty else { return (attr, []) }
+        let out = NSMutableAttributedString(attributedString: attr)
+        var refs: [ImageRef] = []
+        for (n, (i, a)) in hits.enumerated() {
+            if let img = a as? ImageAttachment {
+                refs.append(ImageRef(at: i - n, file: img.file, width: img.width))
+            }
+        }
+        for (i, _) in hits.reversed() { out.deleteCharacters(in: NSRange(location: i, length: 1)) }
+        return (out, refs)
+    }
+
+    /// Put attachments back into a storage holding stripped text. Refs are
+    /// applied in ascending `at` so each offset still means "in the stripped
+    /// text"; out-of-range offsets clamp to the end.
+    static func reinsert(_ refs: [ImageRef], into ts: NSMutableAttributedString,
+                         baseAttributes: [NSAttributedString.Key: Any]) {
+        var inserted = 0
+        // Stable by saved order, so adjacent images (same `at`) keep theirs.
+        let ordered = refs.enumerated().sorted { ($0.element.at, $0.offset) < ($1.element.at, $1.offset) }
+        for ref in ordered.map(\.element) {
+            let loc = min(max(ref.at, 0) + inserted, ts.length)
+            ts.insert(attachmentString(ImageAttachment(file: ref.file, width: ref.width),
+                                       like: ts, at: loc, fallback: baseAttributes), at: loc)
+            inserted += 1
+        }
+    }
+
+    /// One attachment character carrying the neighbouring text's font and
+    /// paragraph style, so the line it sits on keeps its look.
+    static func attachmentString(_ a: NSTextAttachment, like ts: NSAttributedString, at loc: Int,
+                                 fallback: [NSAttributedString.Key: Any]) -> NSAttributedString {
+        var attrs = fallback
+        if ts.length > 0 {
+            let src = ts.attributes(at: min(max(loc - 1, 0), ts.length - 1), effectiveRange: nil)
+            for key in [NSAttributedString.Key.font, .paragraphStyle, .foregroundColor] {
+                if let v = src[key] { attrs[key] = v }
+            }
+        }
+        attrs[.attachment] = a
+        return NSAttributedString(string: ImageStore.placeholder, attributes: attrs)
+    }
+}
+
 /// An NSTextView that sizes its own height to its content, so several can be
 /// stacked in a scroll view (one per block) instead of each owning a scroller.
 final class GrowingTextView: NSTextView {
@@ -2663,8 +2964,9 @@ final class GrowingTextView: NSTextView {
         return tv
     }
 
-    /// Load a block's saved content (RTF if present, else plain text).
-    func load(rtfData: Data?, plain: String, fontSize: CGFloat) {
+    /// Load a block's saved content (RTF if present, else plain text), then
+    /// put its inline images back at their offsets.
+    func load(rtfData: Data?, plain: String, images: [ImageRef]? = nil, fontSize: CGFloat) {
         let base = NSFont.systemFont(ofSize: fontSize)
         if let d = rtfData, let attr = NSAttributedString(rtf: d, documentAttributes: nil) {
             textStorage?.setAttributedString(attr)
@@ -2675,17 +2977,64 @@ final class GrowingTextView: NSTextView {
             textStorage?.addAttribute(.font, value: base, range: whole)
             textStorage?.addAttribute(.foregroundColor, value: Style.textColor, range: whole)
         }
+        if let refs = images, !refs.isEmpty, let ts = textStorage {
+            ImageBody.reinsert(refs, into: ts,
+                               baseAttributes: [.font: base, .foregroundColor: Style.textColor])
+        }
         invalidateIntrinsicContentSize()
         refreshMath()
         refreshChecklistLook()
         refreshRuleLook()
     }
 
-    /// The current content as base64 RTF (keeps per-range fonts).
+    /// The current content as base64 RTF (keeps per-range fonts). Inline
+    /// images are not in it; use savedBody for anything that gets saved.
     var rtfBase64: String? {
         guard let ts = textStorage else { return nil }
         return ts.rtf(from: NSRange(location: 0, length: ts.length),
                       documentAttributes: [:])?.base64EncodedString()
+    }
+
+    /// What a Block saves for this body: RTF and plain text with the image
+    /// attachment characters stripped, plus a ref per image (nil if none).
+    var savedBody: (rtf: String?, text: String, images: [ImageRef]?) {
+        guard let ts = textStorage, string.contains(ImageStore.placeholder) else {
+            return (rtfBase64, string, nil)
+        }
+        let (stripped, refs) = ImageBody.strip(ts)
+        let rtf = stripped.rtf(from: NSRange(location: 0, length: stripped.length),
+                               documentAttributes: [:])?.base64EncodedString()
+        return (rtf, stripped.string, refs.isEmpty ? nil : refs)
+    }
+
+    /// The body text with image characters taken out, for summaries/titles.
+    /// "Image" when the body is nothing but images.
+    var summaryBody: String? {
+        let text = string.replacingOccurrences(of: ImageStore.placeholder, with: "")
+        if Bullets.isBlank(text) {
+            return text.utf16.count == string.utf16.count ? nil : "Image"
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Insert a stored image at the selection as one undoable edit.
+    func insertImage(file: String) {
+        let range = selectedRange()
+        guard let ts = textStorage,
+              shouldChangeText(in: range, replacementString: ImageStore.placeholder) else { return }
+        let piece = ImageBody.attachmentString(ImageAttachment.fresh(file: file), like: ts,
+                                               at: range.location, fallback: typingAttributes)
+        ts.replaceCharacters(in: range, with: piece)
+        setSelectedRange(NSRange(location: range.location + piece.length, length: 0))
+        didChangeText()
+    }
+
+    /// Raw image data on the pasteboard (a screenshot, "Copy Image"), when
+    /// the pasteboard isn't really text or a file. Stage 2 widens this.
+    private func pastedImageData(_ pb: NSPasteboard) -> Data? {
+        let types = pb.types ?? []
+        guard !types.contains(.fileURL), !types.contains(.rtf) else { return nil }
+        return pb.data(forType: .png) ?? pb.data(forType: .tiff)
     }
 
     /// Paste as plain text restyled to the note's look — so text copied from a
@@ -2696,6 +3045,11 @@ final class GrowingTextView: NSTextView {
         let pb = NSPasteboard.general
         let font = (typingAttributes[.font] as? NSFont) ?? NSFont.systemFont(ofSize: Style.defaultFont)
         let color = (typingAttributes[.foregroundColor] as? NSColor) ?? Style.textColor
+
+        if let data = pastedImageData(pb), let file = ImageStore.importImage(data: data) {
+            insertImage(file: file)
+            return
+        }
 
         // Rich paste: copy red (or any ink) text from one note into another and
         // it stays that color. Keep every run's foreground color when it's one
@@ -2801,11 +3155,11 @@ final class GrowingTextView: NSTextView {
 }
 
 extension GrowingTextView: BlockView {
-    func asBlock() -> Block { Block(kind: .text, rtf: rtfBase64, text: string) }
-    var summaryText: String? {
-        if Bullets.isBlank(string) { return nil }
-        return string.trimmingCharacters(in: .whitespacesAndNewlines)
+    func asBlock() -> Block {
+        let body = savedBody
+        return Block(kind: .text, rtf: body.rtf, text: body.text, images: body.images)
     }
+    var summaryText: String? { summaryBody }
     var primaryTextView: NSTextView { self }
     func owns(_ tv: NSTextView) -> Bool { tv === self }
 }
@@ -2982,7 +3336,7 @@ final class SectionView: NSView, NSTextFieldDelegate {
         header.alignment = .centerY
         header.translatesAutoresizingMaskIntoConstraints = false
 
-        body.load(rtfData: block.rtfData, plain: block.text, fontSize: fontSize)
+        body.load(rtfData: block.rtfData, plain: block.text, images: block.images, fontSize: fontSize)
         body.textContainerInset = NSSize(width: 16, height: 4)   // indent under the header
 
         let vstack = FlippedStack(views: [header, body])
@@ -3234,9 +3588,10 @@ final class SectionView: NSView, NSTextFieldDelegate {
 
     /// Serialize back to a Block for saving.
     func asBlock() -> Block {
-        Block(kind: .section, rtf: body.rtfBase64, text: body.string,
-              title: titleField.stringValue, collapsed: collapsed,
-              titleSize: titleFontSize, titleInk: titleInkName)
+        let saved = body.savedBody
+        return Block(kind: .section, rtf: saved.rtf, text: saved.text,
+                     title: titleField.stringValue, collapsed: collapsed,
+                     titleSize: titleFontSize, titleInk: titleInkName, images: saved.images)
     }
 }
 
@@ -3244,8 +3599,7 @@ extension SectionView: BlockView {
     var summaryText: String? {
         let t = title.trimmingCharacters(in: .whitespaces)
         if !t.isEmpty { return t }
-        if Bullets.isBlank(body.string) { return nil }
-        return body.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return body.summaryBody
     }
     var primaryTextView: NSTextView { body }
     func owns(_ tv: NSTextView) -> Bool { tv === body }
@@ -4089,6 +4443,10 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         let grain = GrainView(frame: glass.frame)
         grain.autoresizingMask = [.width, .height]
         root.addSubview(grain)
+        // The glass edge goes over the grain too, so the rim reads clean.
+        let edge = EdgeLightView(frame: glass.frame)
+        edge.autoresizingMask = [.width, .height]
+        root.addSubview(edge)
         root.addSubview(container)
         window.contentView = root
         window.delegate = self
@@ -4175,7 +4533,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     private func makeTextView(from block: Block) -> GrowingTextView {
         let tv = GrowingTextView.make(delegate: self, fontSize: fontSize)
-        tv.load(rtfData: block.rtfData, plain: block.text, fontSize: fontSize)
+        tv.load(rtfData: block.rtfData, plain: block.text, images: block.images, fontSize: fontSize)
         return tv
     }
 
@@ -5651,7 +6009,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             guard let scalar = Unicode.Scalar(s.character(at: i)) else { return false }
             let char = Character(scalar)
             if char == " " || char == "\t" { sawSpace = true; i -= 1; continue }
-            if char.isNewline { return true }
+            if char.isNewline || char == "\u{FFFC}" { return true }   // image counts as a line break
             if sawSpace, Bullets.glyphs.contains(char) || Checklist.glyphs.contains(char),
                i == paragraphRange(in: tv, at: i).location { return true }
             return sawSpace && ".!?".contains(char)
