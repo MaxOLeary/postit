@@ -11,7 +11,7 @@
 // and a size button whose readout follows the cursor and whose hover drops a
 // menu of every size; on the right, the meeting bubble and ✕. Typing shortcuts: double-tap
 // a capital trigger (RR / GG / BB for ink, WW for white, ## for a section) and
-// both characters vanish, replaced by the action; "---" then Enter becomes a
+// both characters vanish, replaced by the action; "---" then a space becomes a
 // horizontal line; Shift+↑/↓ steps the font size at the cursor. A line reading ":math" turns the lines below it into a
 // live calculator — arithmetic, unit and currency conversions, variables —
 // with answers painted in green (":end" stops it). Every note remembers its
@@ -83,7 +83,7 @@ private enum Style {
     // Horizontal rule ("---" then Enter). White, strongest at the middle of
     // the line and gone at the ends. 0.60 over the dark glass matches the
     // hairline's peak (about #a1a1a1 on #191919).
-    static let rulePeakAlpha: CGFloat = 0.60
+    static let rulePeakAlpha: CGFloat = 0.75
     // Dragging a section by its title: the section dims in place, a snapshot
     // of it follows the cursor, and a line marks where it will land.
     static let dragSourceAlpha: CGFloat = 0.28
@@ -1322,7 +1322,11 @@ enum Checklist {
     }
 }
 
-/// A horizontal rule. Typing `---` on its own line and pressing Enter swaps
+/// What finishes a word for sentence auto-capitalization (Return is handled
+/// separately). Shared by the body blocks and the section titles.
+let sentenceTerminators: Set<Character> = [" ", ".", ",", "!", "?", ";", ":", ")"]
+
+/// A horizontal rule. Typing `---` on its own line and then a space swaps
 /// the dashes for one marker character plus a short paragraph style. The
 /// layout manager hides the marker and paints the line; the character is
 /// what round-trips through RTF, undo, and the pasteboard.
@@ -1368,7 +1372,7 @@ enum Rule {
         }
     }
 
-    /// What Enter turns into a rule: three hyphens, or the single em dash
+    /// What a space turns into a rule: three hyphens, or the single em dash
     /// macOS smart-dashes substitutes for them.
     static func isTriggerLine(_ paragraph: String) -> Bool {
         let core = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1380,24 +1384,51 @@ enum Rule {
         isMarkerLine(line) ? "---" : line
     }
 
-    /// 1pt white stroke, full width, linearly faded to nothing at each end.
-    static func draw(in rect: NSRect) {
+    /// Stroke profile. The middle `plateau` share of the line is full
+    /// brightness and full thickness; outside it both fall away with 1 - u²,
+    /// slowly at first and fast at the very ends. The lavish preview page
+    /// (.lavish/rule-and-x.html) draws the same curve from the same numbers.
+    static let plateau: CGFloat = 0.25
+    static let thickness: CGFloat = 2
+
+    /// 0…1 across the line → 0…1 brightness/thickness.
+    static func weight(_ x: CGFloat) -> CGFloat {
+        let d = abs(x - 0.5) * 2                      // 0 at the middle, 1 at an end
+        guard d > plateau else { return 1 }
+        let u = (d - plateau) / (1 - plateau)
+        return max(0, 1 - u * u)
+    }
+
+    /// The rule in the ink it was typed with: `rect.height` is the thickness
+    /// at the middle, the lens outline and the alpha both follow `weight`.
+    static func draw(in rect: NSRect, color: NSColor) {
         guard rect.width > 1, rect.height > 0,
               let ctx = NSGraphicsContext.current?.cgContext else { return }
-        let colors = [
-            NSColor.white.withAlphaComponent(0).cgColor,
-            NSColor.white.withAlphaComponent(Style.rulePeakAlpha).cgColor,
-            NSColor.white.withAlphaComponent(0).cgColor,
-        ] as CFArray
-        let locs: [CGFloat] = [0, 0.5, 1]
+        let rgb = color.usingColorSpace(.deviceRGB) ?? color
+        let n = 48
+        let midY = rect.midY
+        let half = rect.height / 2
+        func x(_ i: Int) -> CGFloat { rect.minX + rect.width * CGFloat(i) / CGFloat(n) }
+        func w(_ i: Int) -> CGFloat { weight(CGFloat(i) / CGFloat(n)) }
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: x(0), y: midY + half * w(0)))
+        for i in 1...n { path.addLine(to: CGPoint(x: x(i), y: midY + half * w(i))) }
+        for i in stride(from: n, through: 0, by: -1) { path.addLine(to: CGPoint(x: x(i), y: midY - half * w(i))) }
+        path.closeSubpath()
+        var colors: [CGColor] = []
+        var locs: [CGFloat] = []
+        for i in 0...n {
+            colors.append(rgb.withAlphaComponent(Style.rulePeakAlpha * w(i)).cgColor)
+            locs.append(CGFloat(i) / CGFloat(n))
+        }
         guard let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
-                                        colors: colors, locations: locs) else { return }
+                                        colors: colors as CFArray, locations: locs) else { return }
         ctx.saveGState()
-        ctx.addRect(rect)
+        ctx.addPath(path)
         ctx.clip()
         ctx.drawLinearGradient(gradient,
-                               start: CGPoint(x: rect.minX, y: rect.midY),
-                               end: CGPoint(x: rect.maxX, y: rect.midY),
+                               start: CGPoint(x: rect.minX, y: midY),
+                               end: CGPoint(x: rect.maxX, y: midY),
                                options: [])
         ctx.restoreGState()
     }
@@ -1474,11 +1505,13 @@ final class ChecklistLayoutManager: NSLayoutManager {
             let frag = self.lineFragmentRect(forGlyphAt: g.location, effectiveRange: nil)
             let used = self.lineFragmentUsedRect(forGlyphAt: g.location, effectiveRange: nil)
             guard frag.width > 1, used.height > 0 else { return }
-            let h: CGFloat = 1
-            var y = (used.midY * scale).rounded() / scale
+            let h = Rule.thickness
+            var y = ((used.midY - h / 2) * scale).rounded() / scale
             y = min(max(y, used.minY), max(used.minY, used.maxY - h))
+            let color = (storage.attribute(.foregroundColor, at: para.location, effectiveRange: nil) as? NSColor)
+                ?? Style.textColor
             Rule.draw(in: NSRect(x: frag.minX + origin.x, y: y + origin.y,
-                                 width: frag.width, height: h))
+                                 width: frag.width, height: h), color: color)
         }
     }
 }
@@ -3227,6 +3260,32 @@ final class TitleFieldEditor: NSTextView {
     }
 }
 
+/// The empty run of a section header to the right of the title. Clicks go
+/// to the title (caret placement), so the row edits the way it did when the
+/// field spanned it.
+private final class TitleSpacer: NSView {
+    var onClick: ((NSEvent) -> Void)?
+    override func mouseDown(with event: NSEvent) { onClick?(event) }
+}
+
+/// A header row that knows when the pointer is over it, so the ✕ can show
+/// only on hover.
+private final class HoverStack: NSStackView {
+    var onHover: ((Bool) -> Void)?
+    private var tracking: NSTrackingArea?
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let t = NSTrackingArea(rect: .zero,
+                               options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                               owner: self, userInfo: nil)
+        addTrackingArea(t)
+        tracking = t
+    }
+    override func mouseEntered(with event: NSEvent) { onHover?(true) }
+    override func mouseExited(with event: NSEvent) { onHover?(false) }
+}
+
 /// A collapsible section: a disclosure header with an editable title and a
 /// delete button, over a foldable rich-text body. Like an Obsidian fold.
 final class SectionView: NSView, NSTextFieldDelegate {
@@ -3322,19 +3381,42 @@ final class SectionView: NSView, NSTextFieldDelegate {
         titleField.focusRingType = .none
         titleField.lineBreakMode = .byTruncatingTail
         titleField.delegate = self
-        titleField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // The field is as wide as its text, so the ✕ sits right after the
+        // last letter instead of out at the far edge. A long title gives way
+        // (truncates) before the ✕ does.
+        titleField.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         setTitleInk(name: block.titleInk)
 
+        // Invisible until the pointer is over the row (see HoverStack below).
         let del = chromeSymbolButton("xmark", point: 9, target: self, action: #selector(deleteTapped))
         del.toolTip = "Delete section"
         del.setContentHuggingPriority(.required, for: .horizontal)
+        del.setContentCompressionResistancePriority(.required, for: .horizontal)
+        del.alphaValue = 0
         deleteButton = del
 
-        let header = NSStackView(views: [disclosure, titleField, del])
+        // Takes up the rest of the row so the title hugs its text; a click on
+        // it still puts the caret in the title, the way the whole row used to.
+        let spacer = TitleSpacer()
+        spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        spacer.onClick = { [weak self] e in
+            guard let self else { return }
+            self.placeCaretInTitle(at: e.locationInWindow)
+            if e.clickCount > 1 { self.titleField.currentEditor()?.selectWord(nil) }
+        }
+
+        let header = HoverStack(views: [disclosure, titleField, del, spacer])
         header.orientation = .horizontal
         header.spacing = 6
         header.alignment = .centerY
         header.translatesAutoresizingMaskIntoConstraints = false
+        header.onHover = { [weak del] inside in
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.12
+                del?.animator().alphaValue = inside ? 1 : 0
+            }
+        }
 
         body.load(rtfData: block.rtfData, plain: block.text, images: block.images, fontSize: fontSize)
         body.textContainerInset = NSSize(width: 16, height: 4)   // indent under the header
@@ -3377,10 +3459,10 @@ final class SectionView: NSView, NSTextFieldDelegate {
     }
 
     /// Auto-capitalize sentence starts in the header, the same as the body
-    /// blocks: a lowercase letter typed at the start of the title (or after
-    /// . ! ? plus a space) comes out uppercase. Runs after the shortcut check
-    /// so an uppercase ink trigger (RR/GG/BB/WW) is never disturbed — only
-    /// freshly typed lowercase letters are touched. The title edits through the
+    /// blocks: once a word is finished (space or punctuation typed after it)
+    /// its first letter comes out uppercase if it begins a sentence; a lone
+    /// "i" becomes "I". Runs after the shortcut check so an uppercase ink
+    /// trigger (RR/GG/BB/WW) is never disturbed. The title edits through the
     /// window's shared field editor, which doesn't route the NSTextView change
     /// hook the body uses, so this lives here and diffs against the snapshot.
     private func autoCapitalizeTitle() {
@@ -3392,14 +3474,32 @@ final class SectionView: NSView, NSTextFieldDelegate {
         // (same snapshot diff the shortcut detector uses), so pastes and edits
         // elsewhere in the title are left alone.
         let pre = titlePrev
-        guard sel.length == 0, sel.location >= 1,
+        guard sel.length == 0, sel.location >= 2,
               sel.location == pre.sel.location + 1,
-              text.length == (pre.text as NSString).length - pre.sel.length + 1 else { return }
-        let range = NSRange(location: sel.location - 1, length: 1)
-        guard let ch = text.substring(with: range).first, ch.isLowercase,
-              titleStartsSentence(at: range.location, in: text) else { return }
+              text.length == (pre.text as NSString).length - pre.sel.length + 1,
+              let typed = text.substring(with: NSRange(location: sel.location - 1, length: 1)).first,
+              sentenceTerminators.contains(typed) else { return }
+        capitalizeTitleWord(endingAt: sel.location - 1, in: ed)
+    }
+
+    /// Uppercase the first letter of the word ending at `location` when it
+    /// starts a sentence (or is "i"). Also used when Return leaves the title.
+    private func capitalizeTitleWord(endingAt location: Int, in ed: NSTextView) {
+        let text = ed.string as NSString
+        guard location > 0, location <= text.length else { return }
+        var start = location
+        while start > 0, let sc = Unicode.Scalar(text.character(at: start - 1)),
+              Character(sc).isLetter || Character(sc).isNumber || sc == "'" {
+            start -= 1
+        }
+        guard start < location else { return }
+        let word = text.substring(with: NSRange(location: start, length: location - start))
+        guard let ch = word.first, ch.isLowercase,
+              word == "i" || titleStartsSentence(at: start, in: text) else { return }
+        let sel = ed.selectedRange()
         applyingTitleCase = true
-        ed.insertText(String(ch).uppercased(), replacementRange: range)
+        ed.insertText(String(ch).uppercased(), replacementRange: NSRange(location: start, length: 1))
+        ed.setSelectedRange(sel)
         applyingTitleCase = false
     }
 
@@ -3475,6 +3575,7 @@ final class SectionView: NSView, NSTextFieldDelegate {
             // room between folds. Mid-title Return keeps the default commit.
             let sel = textView.selectedRange()
             if sel.length == 0, sel.location == (textView.string as NSString).length {
+                capitalizeTitleWord(endingAt: sel.location, in: textView)
                 onTitleReturn(self)
                 return true
             }
@@ -4132,10 +4233,10 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     // select a line, type RR, and the line turns red rather than vanishing.
     private var pendingShortcut: (char: Character, location: Int,
                                   tv: ObjectIdentifier, replaced: NSAttributedString?)?
-    // Sentence auto-cap bypass, the delete-and-retype pattern: `lastAutoCap`
-    // remembers where the auto-capital just fired; backspacing that letter
-    // arms `autoCapBypass`, and the next letter typed right there is left
-    // exactly as typed (lowercase stays lowercase).
+    // Sentence auto-cap memory: `lastAutoCap` is where the last capital was
+    // put in. If that letter is later seen lowercase again (⌘Z, or fixed by
+    // hand) the spot moves to `autoCapBypass`, and finishing a word that
+    // starts there leaves it alone — the "no, I meant lowercase" pattern.
     private var lastAutoCap: (tv: ObjectIdentifier, location: Int)?
     private var autoCapBypass: (tv: ObjectIdentifier, location: Int)?
     // True while a case-fix branch below re-enters the delegate through
@@ -5852,7 +5953,10 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     // MARK: text delegate (typing shortcuts, auto-cap, ink)
     func textDidChange(_ notification: Notification) {
-        if let tv = notification.object as? NSTextView { activeText = tv }
+        if let tv = notification.object as? NSTextView {
+            activeText = tv
+            noteUndoneCap(in: tv)
+        }
         saveDebounced()
     }
 
@@ -5929,73 +6033,78 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             return false
         }
 
-        // Backspacing the letter the auto-cap just uppercased reads as
-        // "I wanted lowercase" — arm the one-shot bypass for that spot.
-        let tvID = ObjectIdentifier(textView)
-        if replacementString?.isEmpty == true, affectedCharRange.length == 1,
-           let cap = lastAutoCap, cap.tv == tvID,
-           cap.location == affectedCharRange.location {
-            autoCapBypass = cap
-            lastAutoCap = nil
-        }
-
-        // Shift bypass: a capital typed with Shift held at a sentence start
-        // means "I want lowercase here" — autocap already covers the capital
-        // case, so Shift inverts. pendingShortcut stays armed: the first tap
-        // of an ink pair (GG at a line start) still fires on the second tap.
-        if let s = replacementString, s.count == 1, let ch = s.first,
-           ch.isUppercase, !textView.hasMarkedText(),
-           NSApp.currentEvent?.modifierFlags.contains(.shift) == true,
-           startsSentence(at: affectedCharRange.location, in: textView) {
-            let lower = s.lowercased()
-            applyingCaseFix = true
-            defer { applyingCaseFix = false }
-            if textView.shouldChangeText(in: affectedCharRange, replacementString: lower) {
-                textView.textStorage?.replaceCharacters(
-                    in: affectedCharRange,
-                    with: NSAttributedString(string: lower,
-                                             attributes: textView.typingAttributes))
-                textView.didChangeText()
-                textView.setSelectedRange(
-                    NSRange(location: affectedCharRange.location + (lower as NSString).length,
-                            length: 0))
-            }
+        // "--- " → a horizontal rule, caret on the line below.
+        if replacementString == " ", affectedCharRange.length == 0,
+           spaceOnRuleTrigger(at: affectedCharRange.location, in: textView) {
             return false
         }
 
-        // Auto-capitalize sentence starts: a lowercase letter typed at the
-        // start of a block, right after a newline, or after end-of-sentence
-        // punctuation plus a space comes out uppercase.
-        if let s = replacementString, s.count == 1, let ch = s.first,
-           ch.isLowercase, !textView.hasMarkedText(),
-           startsSentence(at: affectedCharRange.location, in: textView) {
-            // The bypass: this exact spot just had its auto-capital deleted,
-            // so this letter goes in untouched.
-            if let bp = autoCapBypass, bp.tv == tvID,
-               bp.location == affectedCharRange.location {
-                autoCapBypass = nil
-                return true
-            }
-            let upper = s.uppercased()
-            applyingCaseFix = true
-            defer { applyingCaseFix = false }
-            if textView.shouldChangeText(in: affectedCharRange, replacementString: upper) {
-                textView.textStorage?.replaceCharacters(
-                    in: affectedCharRange,
-                    with: NSAttributedString(string: upper,
-                                             attributes: textView.typingAttributes))
-                textView.didChangeText()
-                textView.setSelectedRange(
-                    NSRange(location: affectedCharRange.location + (upper as NSString).length,
-                            length: 0))
-                // The uppercased letter isn't a deliberate capital — don't let
-                // it arm a double-tap shortcut ("rR" must not fire red).
-                pendingShortcut = nil
-                lastAutoCap = (tvID, affectedCharRange.location)
-            }
-            return false
+        // Sentence capitals go in once the word is finished (space or
+        // punctuation after it), the way Google Docs does it — never while
+        // the letter is being typed. Return is handled in doCommandBy, since
+        // the bullet/checklist handlers eat it first.
+        if let t = replacementString?.first, replacementString?.count == 1,
+           sentenceTerminators.contains(t), affectedCharRange.length == 0 {
+            scheduleSentenceCap(wordEndingAt: affectedCharRange.location, in: textView)
         }
         return true
+    }
+
+    /// Sentence auto-capitalization, the Google Docs way: nothing happens
+    /// while a word is being typed; once it is finished the first letter of a
+    /// word that starts a sentence is uppercased, and a lone "i" becomes "I".
+    /// The capital goes in right before the terminator, in the same
+    /// keystroke, so ⌘Z behaves like any other typing undo. A word whose
+    /// capital was undone or edited back to lowercase is remembered and left
+    /// alone. Plain string logic, nothing platform-specific, on purpose:
+    /// this has to port with the rest of the editor.
+    private func scheduleSentenceCap(wordEndingAt location: Int, in tv: NSTextView) {
+        guard !tv.hasMarkedText(), let ts = tv.textStorage,
+              let word = sentenceWord(endingAt: location, in: tv) else { return }
+        let tvID = ObjectIdentifier(tv)
+        if let bp = autoCapBypass, bp.tv == tvID, bp.location == word.location { return }
+        let first = NSRange(location: word.location, length: 1)
+        let upper = (ts.string as NSString).substring(with: first).uppercased()
+        let attrs = ts.attributes(at: first.location, effectiveRange: nil)
+        let sel = tv.selectedRange()
+        applyingCaseFix = true
+        defer { applyingCaseFix = false }
+        guard tv.shouldChangeText(in: first, replacementString: upper) else { return }
+        ts.replaceCharacters(in: first, with: NSAttributedString(string: upper, attributes: attrs))
+        tv.didChangeText()
+        tv.setSelectedRange(sel)
+        lastAutoCap = (tvID, first.location)
+        autoCapBypass = nil
+    }
+
+    /// The word that ends right at `location`, when it should get a capital:
+    /// it starts with a lowercase letter and either begins a sentence or is a
+    /// lone "i". Nil otherwise.
+    private func sentenceWord(endingAt location: Int, in tv: NSTextView) -> NSRange? {
+        let s = tv.string as NSString
+        guard location > 0, location <= s.length else { return nil }
+        var start = location
+        while start > 0, let sc = Unicode.Scalar(s.character(at: start - 1)),
+              Character(sc).isLetter || Character(sc).isNumber || sc == "'" {
+            start -= 1
+        }
+        guard start < location else { return nil }
+        let range = NSRange(location: start, length: location - start)
+        let word = s.substring(with: range)
+        guard let first = word.first, first.isLowercase else { return nil }
+        if word == "i" { return range }
+        return startsSentence(at: start, in: tv) ? range : nil
+    }
+
+    /// The capital an auto-cap put in is lowercase again (⌘Z, or retyped):
+    /// remember the spot so finishing that word again leaves it be.
+    private func noteUndoneCap(in tv: NSTextView) {
+        guard let cap = lastAutoCap, cap.tv == ObjectIdentifier(tv) else { return }
+        let s = tv.string as NSString
+        guard cap.location < s.length, let sc = Unicode.Scalar(s.character(at: cap.location)),
+              Character(sc).isLowercase else { return }
+        autoCapBypass = cap
+        lastAutoCap = nil
     }
 
     /// Whether a character typed at `location` begins a sentence: the start
@@ -6117,6 +6226,10 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             return backspaceOutOfRule(textView) || backspaceOutOfChecklist(textView)
                 || backspaceOutOfBullet(textView) || backspaceAcrossBlocks(textView)
         case #selector(NSResponder.insertNewline(_:)):
+            // Return finishes a word too (see scheduleSentenceCap).
+            if textView.selectedRange().length == 0 {
+                scheduleSentenceCap(wordEndingAt: textView.selectedRange().location, in: textView)
+            }
             return newlineOnRule(textView) || newlineInChecklist(textView) || newlineInBullet(textView)
         case #selector(NSResponder.insertTab(_:)):
             return onChecklistLine(textView) || nestBullet(textView, by: +1)
@@ -6129,19 +6242,33 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     // MARK: horizontal rule
 
-    /// Enter on a line that is exactly `---` turns it into a rule and leaves
-    /// the caret on the new line under it. Enter while sitting on a rule
-    /// opens another line below.
+    /// Enter while sitting on a rule opens another line below.
     private func newlineOnRule(_ tv: NSTextView) -> Bool {
-        guard !tv.hasMarkedText(), let ts = tv.textStorage else { return false }
+        guard !tv.hasMarkedText() else { return false }
         let sel = tv.selectedRange()
         guard sel.length == 0 else { return false }
         let s = tv.string as NSString
         let para = paragraphRange(in: tv, at: min(sel.location, s.length))
+        let core = s.substring(with: para).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard core == Rule.markerString else { return false }
+        return insertLineAfter(para, in: tv)
+    }
+
+    /// A space typed at the end of a line that is exactly `---` (the trigger,
+    /// see shouldChangeText). The line becomes a rule and the caret lands on
+    /// the fresh line under it; the space itself is never inserted.
+    private func spaceOnRuleTrigger(at location: Int, in tv: NSTextView) -> Bool {
+        guard !tv.hasMarkedText(), let ts = tv.textStorage else { return false }
+        let s = tv.string as NSString
+        guard location <= s.length else { return false }
+        let para = paragraphRange(in: tv, at: location)
         let raw = s.substring(with: para)
-        let core = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if core == Rule.markerString { return insertLineAfter(para, in: tv) }
-        guard Rule.isTriggerLine(raw) else { return false }
+        // Caret at the end of the dashes: nothing but a line break may follow.
+        let rest = s.substring(with: NSRange(location: location, length: NSMaxRange(para) - location))
+        guard rest.isEmpty || rest == "\n",
+              Rule.isTriggerLine(s.substring(with: NSRange(location: para.location,
+                                                             length: location - para.location)))
+        else { return false }
 
         let hadBreak = raw.hasSuffix("\n")
         let markerLen = (Rule.markerString as NSString).length
