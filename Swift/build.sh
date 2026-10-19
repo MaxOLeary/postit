@@ -16,6 +16,9 @@ SHIP=0
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp icon/Postit.icns "$APP/Contents/Resources/Postit.icns"   # regenerate with icon/make-icns.sh
+# Libron (OFL 1.1) for note text, with its license; Info.plist registers the folder.
+mkdir -p "$APP/Contents/Resources/Fonts"
+cp fonts/*.ttf fonts/OFL.txt "$APP/Contents/Resources/Fonts/"
 
 # Universal (Apple Silicon + Intel), floor macOS 11 so the translucent-blur
 # fallback path reaches older Macs (SF Symbols, the oldest API the app leans
@@ -41,6 +44,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key>  <string>11.0</string>
     <key>NSHighResolutionCapable</key> <true/>
     <key>LSUIElement</key>             <true/>
+    <key>ATSApplicationFontsPath</key> <string>Fonts</string>
     <!-- Accept markdown / plain-text files (Finder "Open With…", open -a).
          Rank Alternate so Postit never becomes the system default for .md. -->
     <key>CFBundleDocumentTypes</key>

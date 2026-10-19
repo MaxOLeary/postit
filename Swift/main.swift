@@ -200,6 +200,32 @@ private enum Style {
         storage.endEditing()
     }
 
+    // Note text is set in Libron (OFL, bundled in Contents/Resources/Fonts and
+    // registered through ATSApplicationFontsPath). Chrome stays in the system
+    // font. Falls back to the system font if the bundle is missing it.
+    static func noteFont(_ size: CGFloat) -> NSFont {
+        NSFont(name: "Libron-Regular", size: size) ?? .systemFont(ofSize: size)
+    }
+
+    /// Moves every proportional run onto Libron, keeping its size and its
+    /// bold/italic. Old notes saved the system font (RTF stores it as
+    /// HelveticaNeue); monospaced runs are left alone.
+    static func libronize(_ storage: NSTextStorage) {
+        guard NSFont(name: "Libron-Regular", size: 12) != nil else { return }
+        let fm = NSFontManager.shared
+        let whole = NSRange(location: 0, length: storage.length)
+        storage.beginEditing()
+        storage.enumerateAttribute(.font, in: whole) { value, range, _ in
+            guard let f = value as? NSFont, f.familyName != "Libron", !f.isFixedPitch else { return }
+            var lib = noteFont(f.pointSize)
+            let traits = fm.traits(of: f)
+            if traits.contains(.boldFontMask)   { lib = fm.convert(lib, toHaveTrait: .boldFontMask) }
+            if traits.contains(.italicFontMask) { lib = fm.convert(lib, toHaveTrait: .italicFontMask) }
+            storage.addAttribute(.font, value: lib, range: range)
+        }
+        storage.endEditing()
+    }
+
     /// The ink swatch a color corresponds to (within a small tolerance, so a
     /// color that round-tripped through RTF on the pasteboard still matches),
     /// or nil for anything that isn't one of our swatches — foreign colors
@@ -1448,7 +1474,7 @@ final class ChecklistLayoutManager: NSLayoutManager {
         let g = glyphRange(forCharacterRange: NSRange(location: charIndex, length: 1), actualCharacterRange: nil)
         guard g.length > 0, let container = textContainer(forGlyphAt: g.location, effectiveRange: nil) else { return nil }
         let font = (storage.attribute(.font, at: charIndex, effectiveRange: nil) as? NSFont)
-            ?? NSFont.systemFont(ofSize: Style.defaultFont)
+            ?? Style.noteFont(Style.defaultFont)
         let lineRect = lineFragmentRect(forGlyphAt: g.location, effectiveRange: nil)
         let baseline = lineRect.minY + location(forGlyphAt: g.location).y
         let glyphRect = boundingRect(forGlyphRange: g, in: container)
@@ -1563,7 +1589,7 @@ enum WelcomeNote {
     /// saves — so the welcome note loads through the same path as any other.
     private static func body(_ runs: [Run]) -> Block {
         let attr = NSMutableAttributedString()
-        let font = NSFont.systemFont(ofSize: Style.defaultFont)
+        let font = Style.noteFont(Style.defaultFont)
         for run in runs {
             attr.append(NSAttributedString(string: run.text,
                                            attributes: [.font: font,
@@ -2937,7 +2963,7 @@ final class GrowingTextView: NSTextView {
             let glyph = lm.glyphIndexForCharacter(at: NSMaxRange(r.lineRange) - 1)
             let frag = lm.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: nil)
             let font = (ts.attribute(.font, at: r.lineRange.location, effectiveRange: nil)
-                        as? NSFont) ?? self.font ?? NSFont.systemFont(ofSize: Style.defaultFont)
+                        as? NSFont) ?? self.font ?? Style.noteFont(Style.defaultFont)
             let attr = NSAttributedString(string: r.display, attributes: [
                 .font: font, .foregroundColor: Style.mathResultColor,
             ])
@@ -2987,7 +3013,7 @@ final class GrowingTextView: NSTextView {
         tv.textContainer?.size = NSSize(width: 0, height: 10_000_000)
         tv.setContentHuggingPriority(.required, for: .vertical)
         tv.setContentCompressionResistancePriority(.required, for: .vertical)
-        let f = NSFont.systemFont(ofSize: fontSize)
+        let f = Style.noteFont(fontSize)
         tv.font = f
         tv.typingAttributes = [.font: f, .foregroundColor: Style.textColor]
         tv.delegate = delegate
@@ -3000,10 +3026,10 @@ final class GrowingTextView: NSTextView {
     /// Load a block's saved content (RTF if present, else plain text), then
     /// put its inline images back at their offsets.
     func load(rtfData: Data?, plain: String, images: [ImageRef]? = nil, fontSize: CGFloat) {
-        let base = NSFont.systemFont(ofSize: fontSize)
+        let base = Style.noteFont(fontSize)
         if let d = rtfData, let attr = NSAttributedString(rtf: d, documentAttributes: nil) {
             textStorage?.setAttributedString(attr)
-            if let ts = textStorage { Style.regreenRetiredInks(ts) }
+            if let ts = textStorage { Style.regreenRetiredInks(ts); Style.libronize(ts) }
         } else if !plain.isEmpty {
             string = plain
             let whole = NSRange(location: 0, length: (plain as NSString).length)
@@ -3076,7 +3102,7 @@ final class GrowingTextView: NSTextView {
     /// default white unless a swatch is active).
     override func paste(_ sender: Any?) {
         let pb = NSPasteboard.general
-        let font = (typingAttributes[.font] as? NSFont) ?? NSFont.systemFont(ofSize: Style.defaultFont)
+        let font = (typingAttributes[.font] as? NSFont) ?? Style.noteFont(Style.defaultFont)
         let color = (typingAttributes[.foregroundColor] as? NSColor) ?? Style.textColor
 
         if let data = pastedImageData(pb), let file = ImageStore.importImage(data: data) {
@@ -4180,7 +4206,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     private var fontSize: CGFloat
     // The size new typing should use right now. We enforce it on every edit
     // because AppKit likes to reset typing attributes to the surrounding text.
-    private var currentFont = NSFont.systemFont(ofSize: Style.defaultFont)
+    private var currentFont = Style.noteFont(Style.defaultFont)
     // The active ink swatch; nil = default white. Enforced on every edit the
     // same way as the font, so the surrounding text never hijacks the color.
     private var ink: NSColor?
@@ -4491,7 +4517,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         copyToast.isHidden = true
         container.addSubview(copyToast)
 
-        currentFont = NSFont.systemFont(ofSize: fontSize)
+        currentFont = Style.noteFont(fontSize)
         for blocks in data.resolvedColumns {
             insertColumn(makeColumn(blocks: blocks), at: columns.count)
         }
@@ -5530,7 +5556,7 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         guard newSize != fontSize else { return }
         fontSize = newSize
         sizeLabel.stringValue = "\(Style.sizeRank(newSize))"
-        currentFont = NSFont.systemFont(ofSize: newSize)
+        currentFont = Style.noteFont(newSize)
 
         guard let tv = activeText ?? firstTextView() else { saveDebounced(); return }
         let range = tv.selectedRange()
