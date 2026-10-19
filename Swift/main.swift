@@ -4225,12 +4225,13 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     private var sizeMenu: HangingPanel?
     private var sizeRows: [SizeRow] = []
     private var sizeScroll: NSScrollView?
-    private var sizeMenuOpen = false
+    private var sizeMenuOpen = false { didSet { updateStripFade() } }
     private var sizeMenuMonitor: Any?
     private var sizeZone: HoverZone!
     private var strip: NSView!
     private var meetingButton: NSButton?
-    private var inkTrayExpanded = false
+    private var inkTrayExpanded = false { didSet { updateStripFade() } }
+    private var pointerOnStrip = false { didSet { updateStripFade() } }
     // The last single trigger character typed, so a second tap of the same one
     // can fire its double-tap shortcut (RR/GG/BB/WW ink, ## section). When the
     // first tap replaced a selection, `replaced` keeps that text so the fired
@@ -4329,6 +4330,9 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         strip = NSView(frame: NSRect(x: 0, y: container.bounds.height - Style.stripHeight,
                                      width: container.bounds.width, height: Style.stripHeight))
         strip.autoresizingMask = [.width, .minYMargin]
+        // The strip stays invisible until the pointer is over it, then fades in.
+        strip.wantsLayer = true
+        strip.alphaValue = 0
 
         // Left to right: "+" new note, ▸ section, ink ring, size button.
         let plus = chromeButton("+", size: 20, fontSize: 18)
@@ -4433,6 +4437,13 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
         close.action = #selector(closeNote)
         close.toolTip = "Close note (Cmd+W)"
         strip.addSubview(close)
+
+        // Click-through, so every button under it still gets its clicks.
+        let stripZone = HoverZone(frame: strip.bounds)
+        stripZone.autoresizingMask = [.width, .height]
+        stripZone.onEnter = { [weak self] in self?.pointerOnStrip = true }
+        stripZone.onExit  = { [weak self] in self?.pointerOnStrip = false }
+        strip.addSubview(stripZone)
 
         container.addSubview(strip)
 
@@ -5673,6 +5684,17 @@ final class NoteController: NSObject, NSTextViewDelegate, NSWindowDelegate {
             self.drawer.isHidden = true
         })
         drawerTab.toolTip = open ? "Hide the note list (Cmd+S)" : "Show all notes (Cmd+S)"
+    }
+
+    /// Show the strip while the pointer is on it or one of its menus hangs
+    /// open, so sliding down into the size menu doesn't fade the bar away.
+    private func updateStripFade() {
+        guard let strip else { return }
+        let show = pointerOnStrip || inkTrayExpanded || sizeMenuOpen
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            strip.animator().alphaValue = show ? 1 : 0
+        }
     }
 
     /// Drop the swatch column out of the strip, or tuck it back up.
