@@ -3260,14 +3260,6 @@ final class TitleFieldEditor: NSTextView {
     }
 }
 
-/// The empty run of a section header to the right of the title. Clicks go
-/// to the title (caret placement), so the row edits the way it did when the
-/// field spanned it.
-private final class TitleSpacer: NSView {
-    var onClick: ((NSEvent) -> Void)?
-    override func mouseDown(with event: NSEvent) { onClick?(event) }
-}
-
 /// A header row that knows when the pointer is over it, so the ✕ can show
 /// only on hover.
 private final class HoverStack: NSStackView {
@@ -3381,32 +3373,19 @@ final class SectionView: NSView, NSTextFieldDelegate {
         titleField.focusRingType = .none
         titleField.lineBreakMode = .byTruncatingTail
         titleField.delegate = self
-        // The field is as wide as its text, so the ✕ sits right after the
-        // last letter instead of out at the far edge. A long title gives way
-        // (truncates) before the ✕ does.
-        titleField.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // The field spans the row (low hugging) so it can never be squeezed
+        // out of view; the ✕ sits at the far edge.
+        titleField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         setTitleInk(name: block.titleInk)
 
         // Invisible until the pointer is over the row (see HoverStack below).
         let del = chromeSymbolButton("xmark", point: 9, target: self, action: #selector(deleteTapped))
         del.toolTip = "Delete section"
         del.setContentHuggingPriority(.required, for: .horizontal)
-        del.setContentCompressionResistancePriority(.required, for: .horizontal)
         del.alphaValue = 0
         deleteButton = del
 
-        // Takes up the rest of the row so the title hugs its text; a click on
-        // it still puts the caret in the title, the way the whole row used to.
-        let spacer = TitleSpacer()
-        spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        spacer.onClick = { [weak self] e in
-            guard let self else { return }
-            self.placeCaretInTitle(at: e.locationInWindow)
-            if e.clickCount > 1 { self.titleField.currentEditor()?.selectWord(nil) }
-        }
-
-        let header = HoverStack(views: [disclosure, titleField, del, spacer])
+        let header = HoverStack(views: [disclosure, titleField, del])
         header.orientation = .horizontal
         header.spacing = 6
         header.alignment = .centerY
