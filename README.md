@@ -82,6 +82,8 @@ Cmd+Z undoes, Cmd+Q quits. The welcome note on first launch walks through all of
 The entire app is one Swift file, `Swift/main.swift`. It builds with `swiftc`
 alone; there is no Xcode project and there are no dependencies.
 
+Mac fixes ship with a port note in [`ports/`](ports/README.md). If you have the newest Windows or Linux source, that file tells you how to make the same change, or says the change is Mac-only.
+
 ```bash
 cd Swift && ./build.sh          # builds, signs, installs /Applications/Postit.app
 cd Swift && ./build.sh --ship   # also verifies, refreshes the committed Postit.app, uploads the release
