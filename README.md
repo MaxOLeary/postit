@@ -84,6 +84,8 @@ alone; there is no Xcode project and there are no dependencies.
 
 Mac fixes ship with a port note in [`ports/`](ports/README.md). If you have the newest Windows or Linux source, that file tells you how to make the same change, or says the change is Mac-only.
 
+The Windows and Linux notes app is [`qt/`](qt/README.md). On Windows, Python 3.12+, `pip install -r qt/requirements.txt`, then `python qt/main.py`.
+
 ```bash
 cd Swift && ./build.sh          # builds, signs, installs /Applications/Postit.app
 cd Swift && ./build.sh --ship   # also verifies, refreshes the committed Postit.app, uploads the release

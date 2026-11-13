@@ -1,4 +1,7 @@
 .DS_Store
+qt/.venv/
+qt/__pycache__/
+qt/dev-notes/
 Swift/Postit.app/
 # a local Markdown mirror of your notes, if you point MDMirrorFolder here
 /notes/
